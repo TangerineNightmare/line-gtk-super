@@ -319,6 +319,8 @@ pub(super) enum Pending {
         generation: u64,
     },
     Send {
+        account: Option<String>,
+        generation: u64,
         chat_mid: String,
         placeholder_id: String,
         reply_draft: Option<super::replies::ReplyDraft>,

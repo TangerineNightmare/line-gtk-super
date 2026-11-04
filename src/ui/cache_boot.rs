@@ -254,6 +254,7 @@ fn give_back(state: &AppState, item: &Queued) {
 fn flush(state: &AppState) {
     let items = state.outbox.borrow_mut().take();
     let mut unsent = false;
+    let mut unknown = false;
     for item in items {
         if *state.self_mid.borrow() != item.account {
             give_back(state, &item);
@@ -270,12 +271,20 @@ fn flush(state: &AppState) {
                 state.pending.borrow_mut().insert(
                     id,
                     Pending::Send {
+                        account: item.account.clone(),
+                        generation: state.sidecar.session_generation(),
                         chat_mid: item.chat_mid.clone(),
                         placeholder_id: item.placeholder_id.clone(),
                         reply_draft,
                         mention_draft,
                     },
                 );
+            }
+            Err(error) if error.to_string() == "send_outcome_unknown" => {
+                // A partial pipe write may already have submitted this item.
+                // Retain its bubble and keep it out of the recovery outbox.
+                super::read_details::send_unknown(state, &item.placeholder_id);
+                unknown = true;
             }
             Err(_) => {
                 give_back(state, &item);
@@ -285,6 +294,9 @@ fn flush(state: &AppState) {
     }
     if unsent {
         toast(state, &crate::i18n::t("outbox_not_sent"));
+    }
+    if unknown {
+        toast(state, &crate::i18n::t("send_outcome_unknown"));
     }
 }
 

@@ -1173,10 +1173,16 @@ fn send_current(state: &AppState) {
             dismiss_new_marker(state);
             pin_messages_to_latest(state);
         }
-        Err(e) => toast(
-            state,
-            &crate::i18n::tf("send_failed", &[("error", &e.to_string())]),
-        ),
+        Err(e) => {
+            if e.to_string() == "send_outcome_unknown" {
+                toast(state, &crate::i18n::t("send_outcome_unknown"));
+            } else {
+                toast(
+                    state,
+                    &crate::i18n::tf("send_failed", &[("error", &e.to_string())]),
+                );
+            }
+        }
     }
 }
 
@@ -1221,6 +1227,8 @@ fn begin_optimistic_send(state: &AppState, req_id: u64, chat_mid: &str, mut msg:
     state.pending.borrow_mut().insert(
         req_id,
         Pending::Send {
+            account: state.self_mid.borrow().clone(),
+            generation: state.sidecar.session_generation(),
             chat_mid: chat_mid.into(),
             placeholder_id,
             mention_draft: (!msg.mentions.is_empty()).then(|| mentions::MentionDraft {

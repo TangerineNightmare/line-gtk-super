@@ -13,6 +13,8 @@ import type { ReadPermission } from "./read_policy.ts";
 import { replyMessageId, replySnapshot } from "./replies.ts";
 import { createLineFetch } from "./connection.ts";
 import { coerceI64 } from "./messages.ts";
+import { guardTextSession, sendText } from "./message_send.ts";
+import { createMessageOperations } from "./message_operations.ts";
 import { type ChatRow, contactChatRow } from "./chat_rows.ts";
 import {
   clampPageSize,
@@ -119,10 +121,19 @@ export type CommandRuntime = {
   touchChatPreviewFromMessage: (message: Json) => void;
   emitEvent: (event: string, payload?: Json) => void;
   ok: (id: number | string | null, result?: unknown) => void;
-  fail: (id: number | string | null, error: string) => void;
+  fail: (id: number | string | null, error: string, result?: unknown) => void;
+  assertCanSend?: (chatMid: string) => void;
 };
 
 export function createCommandService(runtime: CommandRuntime) {
+  const operations = createMessageOperations(() => {
+    const client = runtime.getClient();
+    return client
+      ? { owner: client, accountMid: String(client.base.profile?.mid ?? "") }
+      : null;
+  });
+  let recordedFor: Client | null = null;
+  const recorded = new Set<string>();
   let loginInFlight = false;
   async function withLogin(
     id: number | string | null,
@@ -871,7 +882,9 @@ export function createCommandService(runtime: CommandRuntime) {
         at: cached.at,
         messages: appendLive(cached.messages, message),
       });
-      void saveDiskMessages(chatMid, [message], { contiguous: true });
+      void saveDiskMessages(chatMid, [message], { contiguous: true }).catch(
+        () => console.error("[send] Could not save confirmed message to cache"),
+      );
     }
     // Without a usable id the old marker would hide this message.
     boxCursor.delete(chatMid);
@@ -1008,6 +1021,7 @@ export function createCommandService(runtime: CommandRuntime) {
     text: string,
     replyToMessageId?: unknown,
     rawMentions?: unknown,
+    rawOperationId?: unknown,
   ) {
     const client = runtime.getClient();
     if (!client) {
@@ -1039,79 +1053,67 @@ export function createCommandService(runtime: CommandRuntime) {
       ? (original ? replySnapshot(original) : { messageId: relatedMessageId })
       : null;
 
-    let sent:
-      | { id?: unknown; createdTime?: unknown; contentType?: unknown }
-      | null = null;
-
-    // Prefer plain first (avoids e2ee contentMetadata crashes on some peers), then e2ee.
-    try {
-      sent = await client.base.talk.sendMessage({
-        to: chatMid,
-        text,
-        contentMetadata,
-        relatedMessageId,
-        e2ee: false,
-      }) as unknown as typeof sent;
-    } catch (e1) {
-      try {
-        sent = await client.base.talk.sendMessage({
-          to: chatMid,
-          text,
-          contentMetadata,
-          relatedMessageId,
-          e2ee: true,
-        }) as unknown as typeof sent;
-      } catch (e2) {
-        try {
-          const chat = await client.getChat(chatMid);
-          const m = await chat.sendMessage({
-            text,
-            contentMetadata,
-            relatedMessageId,
-          });
-          const message = await summarizeTalkMessage(m, { withMedia: false })
-            .catch(() =>
-              sentMessagePayload(
-                {
-                  id: (m as { raw?: { id?: unknown } }).raw?.id,
-                  createdTime: Date.now(),
-                },
-                chatMid,
-                text,
-              )
-            );
-          message.replyTo = replyTo;
-          message.mentions = mentions;
-          recordSent(chatMid, message);
-          runtime.setChatCache(null);
-          touchChatPreviewFromMessage(message);
-          ok(id, { message });
-          return;
-        } catch (e3) {
-          fail(
-            id,
-            e3 instanceof Error
-              ? e3.message
-              : e2 instanceof Error
-              ? e2.message
-              : e1 instanceof Error
-              ? e1.message
-              : String(e1),
-          );
-          return;
-        }
-      }
+    if (!/^[ucr][a-zA-Z0-9_-]{1,128}$/.test(chatMid)) {
+      fail(id, "invalid_chat");
+      return;
     }
-
-    runtime.setChatCache(null);
+    if (
+      original &&
+      (original.contentType === "UNSENT" || original.decryptionFailed)
+    ) {
+      fail(id, "invalid_reply_target");
+      return;
+    }
+    const operationId = rawOperationId === undefined
+      ? `text-${crypto.randomUUID()}`
+      : String(rawOperationId);
+    guardTextSession(client, () => runtime.getClient() === client);
+    const payload = { chatMid, text, contentMetadata, relatedMessageId };
+    const result = await operations.run(
+      operationId,
+      chatMid,
+      payload,
+      (check, sending) =>
+        sendText(client, payload, () => {
+          check();
+          runtime.assertCanSend?.(chatMid);
+          if (
+            relatedMessageId && msgCache.get(chatMid)?.messages.some((m) =>
+              String(m.id) === relatedMessageId &&
+              (m.contentType === "UNSENT" || m.decryptionFailed)
+            )
+          ) throw new Error("invalid_reply_target");
+        }, sending),
+    );
+    // A completed request from an old session must never update the new cache.
+    if (runtime.getClient() !== client) {
+      fail(id, "session_changed", result);
+      return;
+    }
+    if (result.state !== "succeeded" || !result.sent) {
+      fail(id, result.error ?? "send_outcome_unknown", result);
+      return;
+    }
     const message = {
-      ...sentMessagePayload(sent, chatMid, text),
+      ...sentMessagePayload(result.sent, chatMid, text),
       replyTo,
       mentions,
     };
-    recordSent(chatMid, message);
-    touchChatPreviewFromMessage(message);
-    ok(id, { message });
+    if (recordedFor !== client) {
+      recordedFor = client;
+      recorded.clear();
+    }
+    if (!recorded.has(operationId)) {
+      recorded.add(operationId);
+      try {
+        recordSent(chatMid, message);
+        runtime.setChatCache(null);
+        touchChatPreviewFromMessage(message);
+      } catch {
+        console.error("[send] Could not update cache after confirmed send");
+      }
+    }
+    ok(id, { ...result, message });
   }
 
   return {
@@ -1127,6 +1129,8 @@ export function createCommandService(runtime: CommandRuntime) {
     fetchOlderMessages: doFetchOlder,
     fetchNewerCachedMessages: doFetchNewerCached,
     sendMessage: doSend,
+    messageOperationStatus: operations.status,
+    cancelMessageOperation: operations.cancel,
     async mentionMembers(id: number | string | null, chatMid: string) {
       const client = runtime.getClient();
       if (!client) {

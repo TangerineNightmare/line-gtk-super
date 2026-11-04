@@ -21,9 +21,30 @@ pub(super) fn close() {
 const MAX_AVATARS: usize = 4;
 
 pub(super) struct Slot {
+    send_unknown: bool,
     status: gtk::Label,
     readers: gtk::Button,
     people: Vec<(String, String, Option<gdk::Texture>)>,
+}
+
+pub(super) fn send_unknown(state: &AppState, id: &str) {
+    if let Some(slot) = state.receipt_slots.borrow_mut().get_mut(id) {
+        slot.send_unknown = true;
+        slot.status.set_text(&crate::i18n::t("send_state_unknown"));
+        slot.status.remove_css_class("line-msg-status");
+        slot.status.add_css_class("caption");
+        slot.status.add_css_class("heading");
+        slot.status
+            .set_tooltip_text(Some(&crate::i18n::t("send_outcome_unknown")));
+        slot.readers.set_visible(false);
+    }
+    if let Some(row) = state.pending_rows.borrow().get(id) {
+        row.remove_css_class("line-msg-pending-row");
+        if let Some(outer) = row.first_child() {
+            outer.remove_css_class("line-msg-pending");
+        }
+        row.set_tooltip_text(Some(&crate::i18n::t("send_outcome_unknown")));
+    }
 }
 
 pub(super) fn metadata(state: &AppState, message: &MessageInfo) -> gtk::Box {
@@ -43,6 +64,7 @@ pub(super) fn metadata(state: &AppState, message: &MessageInfo) -> gtk::Box {
     let id = message.id.clone();
     readers.connect_clicked(move |_| open(&s, &id));
     let mut slot = Slot {
+        send_unknown: false,
         status,
         readers,
         people: Vec::new(),
@@ -99,6 +121,12 @@ pub(super) fn avatar_ready(state: &AppState, mid: &str, path: &str) {
 }
 
 pub(super) fn update(state: &AppState, slot: &mut Slot, id: &str, created_time: i64) {
+    if slot.send_unknown {
+        slot.status.set_text(&crate::i18n::t("send_state_unknown"));
+        slot.status
+            .set_tooltip_text(Some(&crate::i18n::t("send_outcome_unknown")));
+        return;
+    }
     let (text, tooltip, read) = receipt_status(state, id, created_time);
     slot.status.set_text(&if read {
         format_msg_time(created_time)
@@ -281,6 +309,196 @@ pub(super) fn refresh(state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a desktop display; uses a fixture sidecar and no LINE account"]
+    fn fixture_unknown_sends_keep_text_and_accept_late_confirmation() {
+        use std::os::unix::fs::PermissionsExt;
+        libadwaita::init().unwrap();
+        let root = std::env::temp_dir().join(format!("linegtk-send-ui-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("protocol")).unwrap();
+        std::os::unix::fs::symlink(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets"),
+            root.join("assets"),
+        )
+        .unwrap();
+        let data = root.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        AppConfig {
+            language: "vi".into(),
+            animations: false,
+            tray_enabled: false,
+            close_to_tray: false,
+            ..AppConfig::default()
+        }
+        .save(&data);
+        let binary = root.join("protocol/line-gtk-protocol");
+        std::fs::write(&binary, "#!/usr/bin/env python3\nimport json, sys\nfor line in sys.stdin:\n    if json.loads(line)['method'] == 'fixture_exit': break\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let app = Application::builder()
+            .application_id("dev.linegtk.SendFixture")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gio::Cancellable>).unwrap();
+        let state = build_ui(&app, root.clone(), data, false).unwrap();
+        *state.self_mid.borrow_mut() = Some("u-self".into());
+        *state.session_ready.borrow_mut() = true;
+        *state.current_chat.borrow_mut() = Some("c-group".into());
+        state.chat_title.set_text("Nhóm bạn bè");
+        state.stack.set_visible_child_name("shell");
+        set_msg_state(&state, "list", None);
+        let message: MessageInfo = serde_json::from_value(serde_json::json!({
+            "text":"Hẹn mọi người lúc 7 giờ nhé!", "from":"u-self", "to":"c-group",
+            "createdTime":1700000000000_i64, "mine":true, "contentType":"NONE"
+        }))
+        .unwrap();
+        let first = state
+            .sidecar
+            .send_message("c-group", &message.text)
+            .unwrap();
+        begin_optimistic_send(&state, first, "c-group", message.clone());
+        let first_placeholder = format!("pending-{first}");
+        state.composer.set_text("Bản nháp tiếp theo");
+        events::handle_event(
+            &state,
+            ProtocolEvent::Response {
+                id: first,
+                ok: false,
+                result: serde_json::json!({"state":"unknown"}),
+                error: Some("send_outcome_unknown".into()),
+            },
+        );
+        refresh_read_labels(&state);
+        assert_eq!(state.composer.text(), "Bản nháp tiếp theo");
+        assert_eq!(
+            state.receipt_slots.borrow()[&first_placeholder]
+                .status
+                .text(),
+            crate::i18n::t("send_state_unknown")
+        );
+        assert!(state.pending_rows.borrow().contains_key(&first_placeholder));
+        assert!(state.outbox.borrow().is_empty());
+
+        let second = state
+            .sidecar
+            .send_message("c-group", "Mình sẽ đặt bàn.")
+            .unwrap();
+        let mut later = message.clone();
+        later.text = "Mình sẽ đặt bàn.".into();
+        begin_optimistic_send(&state, second, "c-group", later.clone());
+        events::handle_event(
+            &state,
+            ProtocolEvent::Response {
+                id: second,
+                ok: false,
+                result: serde_json::Value::Null,
+                error: Some("protocol request timed out".into()),
+            },
+        );
+        assert!(state.pending.borrow().contains_key(&second));
+        later.id = "9007199254740993123".into();
+        // A receive event can precede the send response; the server ID dedupes it.
+        append_message(&state, &later, false);
+        events::handle_event(
+            &state,
+            ProtocolEvent::Response {
+                id: second,
+                ok: true,
+                result: serde_json::json!({"state":"succeeded", "message": {
+                    "id":later.id, "text":later.text, "mine":true, "to":"c-group",
+                    "createdTime":1700000000001_i64, "contentType":"NONE"
+                }}),
+                error: None,
+            },
+        );
+        assert!(!state.pending.borrow().contains_key(&second));
+        assert!(
+            !state
+                .pending_rows
+                .borrow()
+                .contains_key(&format!("pending-{second}"))
+        );
+        assert_eq!(state.message_list.message_count(), 2);
+        for language in ["en", "ja", "vi", "th"] {
+            crate::i18n::set_lang(&root, language);
+            refresh_read_labels(&state);
+            assert_eq!(
+                state.receipt_slots.borrow()[&first_placeholder]
+                    .status
+                    .text(),
+                crate::i18n::t("send_state_unknown")
+            );
+            assert_ne!(crate::i18n::t("send_state_unknown"), "send_state_unknown");
+        }
+        crate::i18n::set_lang(&root, "vi");
+        refresh_read_labels(&state);
+        state.window.set_default_size(760, 640);
+        for (scheme, file) in [
+            (
+                libadwaita::ColorScheme::ForceLight,
+                "send-unknown-light.png",
+            ),
+            (libadwaita::ColorScheme::ForceDark, "send-unknown-dark.png"),
+        ] {
+            libadwaita::StyleManager::default().set_color_scheme(scheme);
+            settle();
+            let paintable = gtk::WidgetPaintable::new(Some(&state.window));
+            let snapshot = gtk::Snapshot::new();
+            paintable.snapshot(
+                &snapshot,
+                state.window.width() as f64,
+                state.window.height() as f64,
+            );
+            let renderer = gtk::gsk::CairoRenderer::new();
+            renderer.realize(None::<&gdk::Surface>).unwrap();
+            renderer
+                .render_texture(snapshot.to_node().unwrap(), None)
+                .save_to_png(root.join(file))
+                .unwrap();
+            renderer.unrealize();
+        }
+        let third = state
+            .sidecar
+            .send_message("c-group", "old account")
+            .unwrap();
+        begin_optimistic_send(&state, third, "c-group", message);
+        *state.self_mid.borrow_mut() = Some("u-new".into());
+        events::handle_event(
+            &state,
+            ProtocolEvent::Response {
+                id: third,
+                ok: true,
+                result: serde_json::json!({"message":{"id":"9999","text":"old account"}}),
+                error: None,
+            },
+        );
+        assert!(!state.seen_msg_ids.borrow().contains("9999"));
+        assert_eq!(state.composer.text(), "Bản nháp tiếp theo");
+        *state.self_mid.borrow_mut() = Some("u-self".into());
+        let fourth = state
+            .sidecar
+            .send_message("c-group", "old process")
+            .unwrap();
+        begin_optimistic_send(&state, fourth, "c-group", later);
+        if let Some(Pending::Send { generation, .. }) = state.pending.borrow_mut().get_mut(&fourth)
+        {
+            *generation = generation.wrapping_sub(1);
+        }
+        // A stale process response is ignored even when its account matches.
+        events::handle_event(
+            &state,
+            ProtocolEvent::Response {
+                id: fourth,
+                ok: true,
+                result: serde_json::json!({"message":{"id":"9998","text":"old process"}}),
+                error: None,
+            },
+        );
+        assert!(!state.seen_msg_ids.borrow().contains("9998"));
+        state.window.destroy();
+        let _ = state.sidecar.request("fixture_exit", None);
+        println!("Send screenshots: {}", root.display());
+    }
 
     fn settle() {
         let context = glib::MainContext::default();

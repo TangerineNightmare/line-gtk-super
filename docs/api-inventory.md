@@ -14,6 +14,7 @@ These methods are dispatched by [`protocol/src/main.ts`](../protocol/src/main.ts
 | Chats and contacts | `list_chats`, `get_chat_members`, `list_friends`, `add_friend`, `get_user_profile`, `get_blocked_contacts`, `set_contact_blocked`, `mute_chat` |
 | Message history | `load_cached_messages`, `fetch_messages`, `fetch_older_messages`, `fetch_newer_messages` |
 | Sending and removing messages | `send_message`, `send_audio`, `send_media`, `send_sticker`, `send_postback`, `unsend_message` |
+| Text operation status (M0) | `message_operation_status`, `cancel_message_operation` |
 | Reactions | `react_message`, `cancel_reaction`, `reaction_emojis`, `reaction_emoji_packs`, `reaction_emoji_pack` |
 | Media and stickers | `download_media`, `list_stickers` |
 | Shared media | `list_shared_media`, `download_shared_media`, `stop_shared_media`, `fetch_shared_message_context` |
@@ -29,6 +30,8 @@ Request envelope:
 ```
 
 Responses use the request ID, `ok`, and `result` or `error`. Asynchronous events use `event` plus event-specific fields. Consult each dispatch branch and its service for exact parameters and results.
+
+M0 text sends accept an optional `operationId`. Operation failures include both `error` and a `result` with `state`, account, destination and operation ID. Status/cancel take `operationId` and only inspect the current session; they never replay a send. Cancellation stops preparation before submit. Timeout/transport uncertainty is `unknown`; fallback to encryption requires an explicit decoded rejection. The registry is memory-only and bounded to 1,024 operations per session. See the [operation contract and capability audit](messaging-m0.md) for outcomes, examples, limits and fixture/live evidence. Media send RPCs retain their existing transport; M0 does not enable forwarding, pinning or notification replies.
 
 Important boundaries:
 

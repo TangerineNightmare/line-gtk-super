@@ -34,6 +34,7 @@ Mọi mục được đánh dấu [x] bên dưới đã có trong bản Line-GTK
 - [x] Lọc cuộc trò chuyện, tìm theo tên/bản xem trước, ghim, ẩn, chặn, tắt tiếng và lưu theo tài khoản
 - [x] Tạm dừng đã đọc toàn cục hoặc theo liên hệ, đánh dấu đã đọc đến hiện tại và đồng bộ chưa đọc từ thiết bị khác
 - [x] Bản nháp, xem trước tệp đính kèm, dán và kéo thả, và xếp tin nhắn chờ khi mất kết nối
+- [x] [Gửi văn bản an toàn hơn](docs/messaging-m0.md): hiện **Chưa xác định** khi chưa rõ kết quả; kiểm tra đích trước khi gửi lại, không tự gửi lại sau timeout
 
 **Sticker và emoji**
 

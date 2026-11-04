@@ -778,5 +778,10 @@
   "group_send_invitations": "Gửi lời mời",
   "group_inviting": "Đang gửi lời mời…",
   "group_invite_done": "Đã gửi lời mời.",
-  "group_invite_failed": "Không thể xác nhận lời mời. Hãy làm mới nhóm trước khi thử lại."
+  "group_invite_failed": "Không thể xác nhận lời mời. Hãy làm mới nhóm trước khi thử lại.",
+  "send_state_unknown": "Chưa xác định",
+  "send_outcome_unknown": "Tin nhắn có thể đã được gửi. Hãy kiểm tra cuộc trò chuyện đích trước khi gửi lại.",
+  "send_rejected": "Tin nhắn chưa được gửi. LINE đã từ chối yêu cầu.",
+  "send_prepare_failed": "Không thể chuẩn bị tin nhắn. Hãy kiểm tra kết nối rồi thử lại.",
+  "message_operation_limit": "Phiên này đã đạt giới hạn thao tác gửi. Hãy kết nối lại trước khi gửi thêm tin nhắn."
 }

@@ -1,5 +1,8 @@
 import { assertEquals } from "@std/assert";
 import type { Client } from "@evex/linejs";
+import { InternalError } from "@evex/linejs/base";
+import { Buffer } from "node:buffer";
+import type { NestedArray } from "@evex/linejs/thrift";
 import { type CommandRuntime, createCommandService } from "../src/commands.ts";
 import { policyFor } from "../src/cache_policy.ts";
 import { createChatPreviews } from "../src/chat_previews.ts";
@@ -43,6 +46,13 @@ function commandFixture(
   let activity = 20;
   const client = {
     base: {
+      profile: { mid: "u-self" },
+      fetch: () =>
+        Promise.reject(new Error("fixture must not use the network")),
+      e2ee: {
+        encryptE2EEMessage: () => Promise.resolve([Buffer.from("encrypted")]),
+      },
+      request: { request: () => Promise.resolve({ id: "99" }) },
       getReqseq: () => sequenceHook(),
       talk: {
         sendChatChecked: () => {
@@ -146,6 +156,26 @@ function commandFixture(
     },
     runtime,
   };
+}
+
+/** Inspect the actual application adapter's Thrift arguments. */
+function stubSend(
+  client: Client,
+  send: (options: Record<string, unknown>) => Promise<unknown>,
+) {
+  client.base.request.request = ((args: NestedArray) => {
+    const fields = args.find((field) => field?.[1] === 2)![2] as NestedArray;
+    const field = (id: number) =>
+      fields.find((entry) => entry?.[1] === id)?.[2];
+    const chunks = (field(20) as unknown[])[1];
+    return send({
+      to: field(2),
+      text: field(10),
+      contentMetadata: (field(18) as unknown[])[2],
+      relatedMessageId: field(21),
+      e2ee: chunks !== undefined,
+    });
+  }) as typeof client.base.request.request;
 }
 
 for (const source of ["通信", "メモリ", "ディスク"] as const) {
@@ -498,18 +528,22 @@ Deno.test("一回既読でも、順序番号の待機中のセッション変更
   assertEquals((fixture.okResults.at(-1) as { marked: boolean }).marked, false);
 });
 
-for (const route of ["plain", "encrypted", "chat"] as const) {
+for (const route of ["plain", "encrypted"] as const) {
   Deno.test(`返信先IDを${route}の送信経路でも維持する`, async () => {
     const fixture = commandFixture("メモリ");
     const calls: Record<string, unknown>[] = [];
     const client = fixture.runtime.getClient()!;
-    client.base.talk.sendMessage = (options) => {
+    stubSend(client, (options) => {
       calls.push(options as Record<string, unknown>);
-      if (route === "chat" || (route === "encrypted" && !options.e2ee)) {
-        return Promise.reject(new Error("経路の検証"));
+      if (route === "encrypted" && !options.e2ee) {
+        return Promise.reject(
+          new InternalError("RequestError", "encrypt required", {
+            code: "E2EE_RETRY_ENCRYPT",
+          }),
+        );
       }
-      return Promise.resolve({ id: "9007199254740994" } as never);
-    };
+      return Promise.resolve({ id: "9007199254740994" });
+    });
     client.getChat = (() =>
       Promise.resolve({
         sendMessage: (options: Record<string, unknown>) => {
@@ -528,7 +562,7 @@ for (const route of ["plain", "encrypted", "chat"] as const) {
     await commands.sendMessage(1, fixture.chat.mid, "返信", "9007199254740993");
     assertEquals(
       calls.length,
-      route === "plain" ? 1 : route === "encrypted" ? 2 : 3,
+      route === "plain" ? 1 : 2,
     );
     for (const call of calls) {
       assertEquals(call.relatedMessageId, "9007199254740993");
@@ -545,10 +579,12 @@ Deno.test("返信先が不正なら送信せず、送信失敗でも引用なし
   let sends = 0;
   const failures: string[] = [];
   const client = fixture.runtime.getClient()!;
-  client.base.talk.sendMessage = () => {
+  stubSend(client, () => {
     sends++;
-    return Promise.reject(new Error("送信不可"));
-  };
+    return Promise.reject(
+      new InternalError("RequestError", "送信不可", { code: "NOT_A_MEMBER" }),
+    );
+  });
   client.getChat = (() =>
     Promise.resolve({
       sendMessage: (options: { relatedMessageId?: string }) => {
@@ -565,8 +601,11 @@ Deno.test("返信先が不正なら送信せず、送信失敗でも引用なし
   assertEquals(sends, 0);
   assertEquals(failures, ["invalid_reply_target"]);
   await commands.sendMessage(2, fixture.chat.mid, "返信", "42");
-  assertEquals(sends, 3);
-  assertEquals(failures, ["invalid_reply_target", "送信不可"]);
+  assertEquals(sends, 1);
+  assertEquals(failures, [
+    "invalid_reply_target",
+    "send_rejected:NOT_A_MEMBER",
+  ]);
 });
 for (const saveFails of [false, true]) {
   Deno.test(`本文で分かった公式分類を即時反映し、保存失敗=${saveFails}でも本文を表示する`, async () => {
@@ -606,18 +645,20 @@ for (const saveFails of [false, true]) {
   });
 }
 
-for (const route of ["plain", "encrypted", "chat"] as const) {
+for (const route of ["plain", "encrypted"] as const) {
   Deno.test(`mentions and reply metadata survive ${route} send and fallback paths`, async () => {
     const fixture = commandFixture("メモリ");
     const client = fixture.runtime.getClient()!;
     const calls: Record<string, unknown>[] = [];
-    client.base.talk.sendMessage = (options) => {
+    stubSend(client, (options) => {
       calls.push(options as Record<string, unknown>);
-      if (route === "chat" || (route === "encrypted" && !options.e2ee)) {
-        return Promise.reject(new Error("fallback"));
+      if (route === "encrypted" && !options.e2ee) {
+        return Promise.reject(
+          new InternalError("RequestError", "encrypt required", { code: 82 }),
+        );
       }
-      return Promise.resolve({ id: "99" } as never);
-    };
+      return Promise.resolve({ id: "99" });
+    });
     client.getChat = (() =>
       Promise.resolve({
         sendMessage: (options: Record<string, unknown>) => {
@@ -640,7 +681,7 @@ for (const route of ["plain", "encrypted", "chat"] as const) {
     );
     assertEquals(
       calls.length,
-      route === "plain" ? 1 : route === "encrypted" ? 2 : 3,
+      route === "plain" ? 1 : 2,
     );
     for (const call of calls) {
       assertEquals(call.relatedMessageId, "42");
@@ -777,4 +818,133 @@ Deno.test("all-member mentions cannot be sent to direct chats", async () => {
   );
   assertEquals(failures, ["invalid_group"]);
   assertEquals(fixture.okResults, []);
+});
+
+Deno.test("a committed text send with a lost response remains unknown and is deduplicated", async () => {
+  const f = commandFixture("メモリ");
+  let committed = 0;
+  let previews = 0;
+  const failures: { error: string; result: unknown }[] = [];
+  f.runtime.fail = (_id, error, result) => failures.push({ error, result });
+  f.runtime.touchChatPreviewFromMessage = () => {
+    previews++;
+  };
+  stubSend(f.runtime.getClient()!, () => {
+    committed++;
+    return Promise.reject(
+      new DOMException("lost after commit", "TimeoutError"),
+    );
+  });
+  const service = createCommandService(f.runtime);
+  await service.sendMessage(
+    1,
+    "c-group",
+    "private text",
+    undefined,
+    undefined,
+    "text-commit",
+  );
+  await service.sendMessage(
+    2,
+    "c-group",
+    "private text",
+    undefined,
+    undefined,
+    "text-commit",
+  );
+  assertEquals(committed, 1);
+  assertEquals(previews, 0);
+  assertEquals(failures.length, 2);
+  assertEquals(
+    service.messageOperationStatus("text-commit").state,
+    "unknown",
+  );
+  assertEquals(
+    JSON.stringify(service.messageOperationStatus("text-commit")).includes(
+      "private text",
+    ),
+    false,
+  );
+});
+
+Deno.test("session, block and unsend changes during sequence allocation prevent text submission", async () => {
+  for (const change of ["session", "block", "unsend"]) {
+    const f = commandFixture("メモリ");
+    const client = f.runtime.getClient()!;
+    let submitted = 0;
+    let blocked = false;
+    const errors: string[] = [];
+    f.runtime.fail = (_id, error) => errors.push(error);
+    f.runtime.assertCanSend = () => {
+      if (blocked) throw new Error("contact_blocked_send");
+    };
+    f.setSequenceHook(() => {
+      if (change === "session") f.runtime.getClient = () => null;
+      if (change === "block") blocked = true;
+      if (change === "unsend") {
+        f.runtime.msgCache.set("c-group", {
+          at: 1,
+          messages: [{ id: "42", contentType: "UNSENT" }],
+        });
+      }
+      return Promise.resolve(1);
+    });
+    stubSend(client, () => {
+      submitted++;
+      return Promise.resolve({ id: "99" });
+    });
+    const service = createCommandService(f.runtime);
+    await service.sendMessage(1, "c-group", "reply", "42");
+    assertEquals(submitted, 0);
+    assertEquals(errors, [
+      change === "session"
+        ? "session_changed"
+        : change === "block"
+        ? "contact_blocked_send"
+        : "invalid_reply_target",
+    ]);
+  }
+});
+
+Deno.test("confirmed sends retain the server ID and do not fail when cache update fails", async () => {
+  const f = commandFixture("メモリ");
+  let submitted = 0;
+  f.runtime.sentMessagePayload = (sent, chatMid, text) => ({
+    id: String(sent?.id),
+    to: chatMid,
+    text,
+  });
+  f.runtime.touchChatPreviewFromMessage = () => {
+    throw new Error("cache fixture failure");
+  };
+  stubSend(f.runtime.getClient()!, () => {
+    submitted++;
+    return Promise.resolve({ id: "9007199254740993123" });
+  });
+  const service = createCommandService(f.runtime);
+  await service.sendMessage(
+    1,
+    "c-group",
+    "confirmed",
+    undefined,
+    undefined,
+    "text-confirmed",
+  );
+  await service.sendMessage(
+    2,
+    "c-group",
+    "confirmed",
+    undefined,
+    undefined,
+    "text-confirmed",
+  );
+  assertEquals(submitted, 1);
+  assertEquals(
+    (f.okResults[0] as { message: { id: string } }).message.id,
+    "9007199254740993123",
+  );
+  assertEquals(
+    service.messageOperationStatus("text-confirmed").state,
+    "succeeded",
+  );
 });

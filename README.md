@@ -34,6 +34,7 @@ Everything checked below is implemented in the current Line-GTK feature set. The
 - [x] Chat filters, name/preview search, pinning, hiding, blocking, muting, and per-account persistence
 - [x] Read-receipt pause globally or per contact, mark read up to now, and unread sync from other devices
 - [x] Drafts, attachment previews, paste and drag-and-drop, and messages queued while reconnecting
+- [x] [Safer text sends](docs/messaging-m0.md): unknown outcomes remain visible; check the destination before resending, with no automatic replay after timeouts
 
 **Stickers and emoji**
 

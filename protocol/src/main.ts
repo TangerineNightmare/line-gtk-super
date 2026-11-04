@@ -194,8 +194,8 @@ function emitEvent(event: string, payload: Json = {}) {
 function ok(id: number | string | null, result: unknown = {}) {
   emit({ id, ok: true, result });
 }
-function fail(id: number | string | null, error: string) {
-  emit({ id, ok: false, error });
+function fail(id: number | string | null, error: string, result?: unknown) {
+  emit({ id, ok: false, error, ...(result === undefined ? {} : { result }) });
 }
 
 // linejs starts detached polling loops. Classify their failures before Deno
@@ -825,13 +825,18 @@ const connectionRecovery = createConnectionRecovery({
 });
 
 const commands = createCommandService({
+  assertCanSend: (chatMid) => {
+    if (contactBlocks.isBlocked(chatMid)) {
+      throw new Error("contact_blocked_send");
+    }
+  },
   recordOwnRead: (chatMid, through) => {
     unreadSync.handleOperation(
       { type: 40, param1: chatMid, param2: through },
       true,
     );
   },
-  getClient: () => client,
+  getClient: () => authDead ? null : client,
   setClient: (next) => {
     if (client !== next) msgCache.clear();
     client = next;
@@ -2734,6 +2739,18 @@ async function handle(req: Json) {
       case "invite_chat_members":
         ok(id, await conversationSettings.invite(params.chatMid, params.mids));
         break;
+      case "message_operation_status":
+        ok(
+          id,
+          commands.messageOperationStatus(String(params.operationId ?? "")),
+        );
+        break;
+      case "cancel_message_operation":
+        ok(
+          id,
+          commands.cancelMessageOperation(String(params.operationId ?? "")),
+        );
+        break;
       case "send_message":
         await commands.sendMessage(
           id,
@@ -2741,6 +2758,7 @@ async function handle(req: Json) {
           String(params.text ?? ""),
           params.replyToMessageId,
           params.mentions,
+          params.operationId,
         );
         break;
       case "send_audio":

@@ -1,6 +1,33 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// A timeout after submission is distinct from a confirmed rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageOperationState {
+    Pending,
+    Sending,
+    Succeeded,
+    Failed,
+    Unknown,
+    Cancelled,
+}
+
+impl MessageOperationState {
+    pub fn from_response(ok: bool, result: &Value, error: Option<&str>) -> Self {
+        if matches!(
+            error,
+            Some("protocol request timed out" | "session_changed" | "send_outcome_unknown")
+        ) {
+            return Self::Unknown;
+        }
+        result
+            .get("state")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or(if ok { Self::Succeeded } else { Self::Failed })
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Request {
     pub id: u64,
@@ -515,6 +542,43 @@ pub enum ProtocolEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn send_outcomes_distinguish_unknown_transport_from_rejected_requests() {
+        use MessageOperationState as State;
+        assert_eq!(
+            State::from_response(false, &Value::Null, Some("protocol request timed out")),
+            State::Unknown
+        );
+        assert_eq!(
+            State::from_response(
+                false,
+                &serde_json::json!({"state": "unknown"}),
+                Some("send_missing_server_id")
+            ),
+            State::Unknown
+        );
+        assert_eq!(
+            State::from_response(
+                false,
+                &serde_json::json!({"state": "failed"}),
+                Some("send_rejected:NOT_A_MEMBER")
+            ),
+            State::Failed
+        );
+        assert_eq!(
+            State::from_response(
+                true,
+                &serde_json::json!({"message": {"id": "9007199254740993"}}),
+                None
+            ),
+            State::Succeeded
+        );
+        assert_eq!(
+            State::from_response(false, &serde_json::json!({"state": "cancelled"}), None),
+            State::Cancelled
+        );
+    }
 
     #[test]
     fn image_library_items_keep_stable_settings_and_photo_delivery() {

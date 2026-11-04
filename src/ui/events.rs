@@ -735,6 +735,35 @@ pub(super) fn handle_event(state: &AppState, ev: ProtocolEvent) {
             error,
         } => {
             let pending = state.pending.borrow_mut().remove(&id);
+            if let Some(Pending::Send {
+                account,
+                generation,
+                ..
+            }) = pending.as_ref()
+                && (*account != *state.self_mid.borrow()
+                    || *generation != state.sidecar.session_generation())
+            {
+                return;
+            }
+            if let Some(Pending::Send { placeholder_id, .. }) = pending.as_ref()
+                && crate::protocol::MessageOperationState::from_response(
+                    ok,
+                    &result,
+                    error.as_deref(),
+                ) == crate::protocol::MessageOperationState::Unknown
+            {
+                hide_upload_progress(state);
+                read_details::send_unknown(state, placeholder_id);
+                toast(state, &crate::i18n::t("send_outcome_unknown"));
+                // A late authoritative response can still replace this bubble.
+                // Keeping this request does not enqueue it for another send.
+                if error.as_deref() == Some("protocol request timed out")
+                    && let Some(pending) = pending
+                {
+                    state.pending.borrow_mut().insert(id, pending);
+                }
+                return;
+            }
             if let Some(Pending::StickerLibrary(request)) = pending {
                 sticker_library::response(state, &request, ok, &result, error.as_deref());
                 return;
@@ -995,6 +1024,12 @@ pub(super) fn handle_event(state: &AppState, ev: ProtocolEvent) {
                     toast(state, &crate::i18n::t("sticker_not_owned"));
                 } else if err.contains("contact_blocked_send") {
                     toast(state, &crate::i18n::t("contact_blocked_send"));
+                } else if err.starts_with("send_rejected:") {
+                    toast(state, &crate::i18n::t("send_rejected"));
+                } else if matches!(err, "send_group_key_unavailable" | "send_prepare_failed") {
+                    toast(state, &crate::i18n::t("send_prepare_failed"));
+                } else if err == "message_operation_limit" {
+                    toast(state, &crate::i18n::t("message_operation_limit"));
                 } else {
                     toast(state, err);
                 }
@@ -1117,6 +1152,11 @@ pub(super) fn handle_event(state: &AppState, ev: ProtocolEvent) {
         }
         ProtocolEvent::Error(e) => toast(state, &e),
         ProtocolEvent::Exited(code) => {
+            for pending in state.pending.borrow().values() {
+                if let Pending::Send { placeholder_id, .. } = pending {
+                    read_details::send_unknown(state, placeholder_id);
+                }
+            }
             read_details::close();
             resume_sync::cancel(state);
             albums::close(state);

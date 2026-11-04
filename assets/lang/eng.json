@@ -778,5 +778,10 @@
   "group_send_invitations": "Send invitations",
   "group_inviting": "Sending invitations…",
   "group_invite_done": "Invitations sent.",
-  "group_invite_failed": "Could not confirm the invitations. Refresh the group before trying again."
+  "group_invite_failed": "Could not confirm the invitations. Refresh the group before trying again.",
+  "send_state_unknown": "Outcome unknown",
+  "send_outcome_unknown": "The message may have been sent. Check the destination before sending it again.",
+  "send_rejected": "The message was not sent. LINE rejected the request.",
+  "send_prepare_failed": "Could not prepare the message. Check your connection and try again.",
+  "message_operation_limit": "This session has reached its send-operation limit. Reconnect before sending more messages."
 }

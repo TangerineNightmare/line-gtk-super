@@ -254,6 +254,7 @@ impl Sidecar {
 
     pub fn request(&self, method: &str, params: Option<Value>) -> Result<u64> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let params = message_operation_params(method, params, self.session_generation(), id);
         let req = Request {
             id,
             method: method.to_string(),
@@ -276,12 +277,21 @@ impl Sidecar {
             if let Ok(mut pending) = self.pending_ids.lock() {
                 pending.remove(&id);
             }
+            // A partial pipe write may have delivered the complete request.
+            // Never tell text-send callers it is safe to replay this payload.
+            if method == "send_message" {
+                return Err(anyhow!("send_outcome_unknown"));
+            }
             return Err(error.into());
         }
         let _ = self
             .timeout_tx
             .send((id, Instant::now() + request_timeout(method)));
         Ok(id)
+    }
+
+    pub fn session_generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
     }
 
     pub fn login_qr(&self) -> Result<u64> {
@@ -629,6 +639,22 @@ impl Sidecar {
     pub fn logout(&self) -> Result<u64> {
         self.request("logout", None)
     }
+}
+
+fn message_operation_params(
+    method: &str,
+    mut params: Option<Value>,
+    generation: u64,
+    id: u64,
+) -> Option<Value> {
+    if method == "send_message"
+        && let Some(Value::Object(object)) = params.as_mut()
+    {
+        object
+            .entry("operationId")
+            .or_insert_with(|| json!(format!("text-{generation}-{id}")));
+    }
+    params
 }
 
 fn find_deno() -> Result<PathBuf> {
@@ -1371,6 +1397,30 @@ impl Drop for Sidecar {
 #[cfg(test)]
 mod authentication_tests {
     use super::*;
+
+    #[test]
+    fn text_operations_keep_their_identity_and_string_message_ids() {
+        let params = message_operation_params(
+            "send_message",
+            Some(json!({"chatMid": "c-test", "replyToMessageId": "9007199254740993123"})),
+            4,
+            17,
+        )
+        .unwrap();
+        assert_eq!(params["operationId"], "text-4-17");
+        assert_eq!(params["replyToMessageId"], "9007199254740993123");
+        let repeated =
+            message_operation_params("send_message", Some(params.clone()), 5, 18).unwrap();
+        assert_eq!(repeated, params);
+        assert_ne!(
+            message_operation_params("send_message", Some(json!({})), 5, 17).unwrap()["operationId"],
+            params["operationId"]
+        );
+        assert_eq!(
+            message_operation_params("search_messages", None, 4, 17),
+            None
+        );
+    }
 
     #[test]
     fn session_failure_preserves_the_authentication_reason() {

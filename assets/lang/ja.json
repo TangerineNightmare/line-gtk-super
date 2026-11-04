@@ -778,5 +778,10 @@
   "group_send_invitations": "招待する",
   "group_inviting": "招待を送信中…",
   "group_invite_done": "招待を送信しました。",
-  "group_invite_failed": "招待の結果を確認できませんでした。グループを更新してから再試行してください。"
+  "group_invite_failed": "招待の結果を確認できませんでした。グループを更新してから再試行してください。",
+  "send_state_unknown": "送信結果不明",
+  "send_outcome_unknown": "送信された可能性があります。再送する前に送信先を確認してください。",
+  "send_rejected": "LINEに拒否されたため、メッセージは送信されませんでした。",
+  "send_prepare_failed": "メッセージを準備できませんでした。接続を確認して再試行してください。",
+  "message_operation_limit": "このセッションの送信上限に達しました。再接続してから送信してください。"
 }
