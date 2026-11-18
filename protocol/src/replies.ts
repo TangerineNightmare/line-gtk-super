@@ -47,9 +47,12 @@ export function replySnapshot(message: Json): ReplyInfo {
 }
 
 // 同じトークの履歴だけで引用文を補う。元の本文が範囲外でも返信先IDは保持する。
-export function withReplyPreviews(messages: Json[]): Json[] {
+export function withReplyPreviews(
+  messages: Json[],
+  cached: Json[] = [],
+): Json[] {
   const originals = new Map(
-    messages.map((m) => [`${conversationMid(m)}:${m.id}`, m]),
+    [...cached, ...messages].map((m) => [`${conversationMid(m)}:${m.id}`, m]),
   );
   return messages.map((message) => {
     const replyTo = replyToOf(message);
@@ -62,4 +65,19 @@ export function withReplyPreviews(messages: Json[]): Json[] {
       replyTo: original ? replySnapshot(original) : replyTo,
     };
   });
+}
+
+export async function resolveReplyPreviews(
+  messages: Json[],
+  loadCached: () => Promise<Json[]>,
+): Promise<Json[]> {
+  const present = new Set(
+    messages.map((message) => `${conversationMid(message)}:${message.id}`),
+  );
+  const missing = messages.some((message) => {
+    const reply = replyToOf(message);
+    return reply &&
+      !present.has(`${conversationMid(message)}:${reply.messageId}`);
+  });
+  return withReplyPreviews(messages, missing ? await loadCached() : []);
 }

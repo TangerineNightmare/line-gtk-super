@@ -27,7 +27,7 @@ import {
   sortMessages,
 } from "./message_history.ts";
 import { appendLive } from "./message_delta.ts";
-import { replyToOf } from "./replies.ts";
+import { replyToOf, resolveReplyPreviews } from "./replies.ts";
 import { groupProfile, setGroupMuted } from "./groups.ts";
 import {
   DECRYPTION_FAILED,
@@ -305,6 +305,25 @@ async function forUiMessages(messages: Json[], chatMid?: string) {
   reactions.observe(messages);
   messageSenders.observe(messages);
   emojiService.observe(messages);
+  if (chatMid && messages.some((message) => replyToOf(message))) {
+    const owner = sharedSession()?.owner;
+    messages = await resolveReplyPreviews(messages, () =>
+      loadSearchHistory({
+        session: sharedSession,
+        disk: async () => {
+          const raw = await readMessageFile(msgDiskDir, chatMid, cacheKey);
+          return {
+            accountMid: raw.accountMid,
+            messages: Array.isArray(raw.messages)
+              ? restoreCachedMessages(raw.messages as Json[])
+              : [],
+          };
+        },
+        memory: () => msgCache.get(chatMid)?.messages ?? [],
+        mask: (history) => unsends.mask(chatMid, history),
+      }));
+    if (sharedSession()?.owner !== owner) return [];
+  }
   return messageView.forUiMessages(messages);
 }
 

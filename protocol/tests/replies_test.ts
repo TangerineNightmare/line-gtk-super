@@ -3,6 +3,7 @@ import {
   replyMessageId,
   replySnapshot,
   replyToOf,
+  resolveReplyPreviews,
   withReplyPreviews,
 } from "../src/replies.ts";
 
@@ -78,4 +79,62 @@ Deno.test("引用元が範囲外でもIDを保持し、復号失敗本文や長�
       .contentType,
     "UNAVAILABLE",
   );
+});
+
+Deno.test("reply previews resolve outside the page without adding cached rows", () => {
+  const original = {
+    id: "42",
+    from: "u-peer",
+    to: "u-self",
+    mine: false,
+    text: "Older cached message",
+    contentType: "NONE",
+  };
+  const reply = {
+    id: "99",
+    from: "u-self",
+    to: "u-peer",
+    mine: true,
+    replyTo: { messageId: "42" },
+  };
+  const result = withReplyPreviews([reply], [original]);
+  assertEquals(result.length, 1);
+  assertEquals(result[0].replyTo, replySnapshot(original));
+  assertEquals(
+    withReplyPreviews([{ ...reply, to: "c-other" }], [original])[0].replyTo,
+    reply.replyTo,
+  );
+  const unsent = { ...original, text: "", contentType: "UNSENT" };
+  assertEquals(
+    withReplyPreviews([reply, unsent], [original])[0].replyTo,
+    replySnapshot(unsent),
+  );
+});
+
+Deno.test("resolved reply pages avoid cache IO; missing originals load once", async () => {
+  const original = {
+    id: "42",
+    from: "u-peer",
+    to: "u-self",
+    mine: false,
+    text: "original",
+  };
+  const reply = {
+    id: "99",
+    from: "u-self",
+    to: "u-peer",
+    mine: true,
+    replyTo: { messageId: "42" },
+  };
+  let reads = 0;
+  const load = () => {
+    reads++;
+    return Promise.resolve([original]);
+  };
+  await resolveReplyPreviews([original], load);
+  await resolveReplyPreviews([reply, original], load);
+  assertEquals(reads, 0);
+  const result = await resolveReplyPreviews([reply], load);
+  assertEquals(reads, 1);
+  assertEquals(result[0].replyTo, replySnapshot(original));
 });
