@@ -1,22 +1,44 @@
 use super::*;
 
-pub(super) fn eligible(message: &MessageInfo) -> bool {
+/// Text the client puts in `text` for media messages that have no caption.
+fn is_media_placeholder(text: &str) -> bool {
+    matches!(text, "[Image]" | "[Video]" | "[Sticker]")
+}
+
+pub(super) fn image_eligible(message: &MessageInfo) -> bool {
+    message.content_type.eq_ignore_ascii_case("IMAGE")
+        && message.id.parse::<u128>().is_ok_and(|id| id > 0)
+        && !message.decryption_failed
+        && message.chat_event.is_none()
+}
+
+fn text_eligible(message: &MessageInfo) -> bool {
     !message.text.is_empty()
+        && !is_media_placeholder(&message.text)
         && !message.decryption_failed
         && message.chat_event.is_none()
         && !["UNSENT", "CHATEVENT", "CHAT_EVENT", "18"]
             .contains(&message.content_type.to_ascii_uppercase().as_str())
 }
 
+pub(super) fn eligible(message: &MessageInfo) -> bool {
+    text_eligible(message) || image_eligible(message)
+}
+
 pub(super) fn append_menu(menu: &gio::Menu, message: &MessageInfo) {
-    if !eligible(message) {
+    let mut items = Vec::new();
+    if text_eligible(message) {
+        items.push(("copy_message", "win.copy-message"));
+        items.push(("copy_message_select", "win.select-copy-message"));
+    }
+    if image_eligible(message) {
+        items.push(("copy_image", "win.copy-image"));
+    }
+    if items.is_empty() {
         return;
     }
     let section = gio::Menu::new();
-    for (key, action) in [
-        ("copy_message", "win.copy-message"),
-        ("copy_message_select", "win.select-copy-message"),
-    ] {
+    for (key, action) in items {
         let item = gio::MenuItem::new(Some(&crate::i18n::t(key)), None);
         item.set_action_and_target_value(Some(action), Some(&message.id.to_variant()));
         section.append_item(&item);
@@ -36,7 +58,7 @@ pub(super) fn wire(state: &AppState) {
                 .reply_messages
                 .borrow()
                 .get(id)
-                .filter(|message| eligible(message))
+                .filter(|message| text_eligible(message))
                 .map(|message| message.text.clone());
             let Some(text) = text else { return };
             if select {
@@ -48,6 +70,25 @@ pub(super) fn wire(state: &AppState) {
         });
         state.window.add_action(&action);
     }
+
+    let action = gio::SimpleAction::new("copy-image", Some(glib::VariantTy::STRING));
+    let s = state.clone();
+    action.connect_activate(move |_, value| {
+        let Some(id) = value.and_then(|value| value.str()) else {
+            return;
+        };
+        let message = s
+            .media_msgs
+            .borrow()
+            .get(id)
+            .or(s.reply_messages.borrow().get(id))
+            .cloned();
+        let Some(message) = message.filter(image_eligible) else {
+            return;
+        };
+        media::request_media_download(&s, &message, "copy_image");
+    });
+    state.window.add_action(&action);
 }
 
 fn selection_dialog(text: &str) -> libadwaita::Dialog {
@@ -214,5 +255,34 @@ mod tests {
         message.content_type = "TEXT".into();
         message.text.clear();
         assert!(!eligible(&message));
+    }
+
+    fn message(value: serde_json::Value) -> MessageInfo {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn image_messages_copy_the_picture_not_the_placeholder_text() {
+        let mut image = message(serde_json::json!({
+            "id": "42", "contentType": "IMAGE", "text": "[Image]"
+        }));
+        assert!(image_eligible(&image));
+        assert!(!text_eligible(&image));
+        // A caption-less image still gets a menu entry.
+        assert!(eligible(&image));
+        image.id = "pending-1".into();
+        assert!(!image_eligible(&image));
+        image.id = "42".into();
+        image.decryption_failed = true;
+        assert!(!image_eligible(&image));
+    }
+
+    #[test]
+    fn text_messages_do_not_offer_image_copy() {
+        let text = message(serde_json::json!({
+            "id": "7", "contentType": "NONE", "text": "hello"
+        }));
+        assert!(text_eligible(&text));
+        assert!(!image_eligible(&text));
     }
 }

@@ -161,7 +161,8 @@ pub(super) fn request_media_download(state: &AppState, msg: &MessageInfo, action
         .get(&msg.id)
         .cloned()
         .unwrap_or_else(|| msg.clone());
-    let for_viewer = action == "open_viewer";
+    // Copying must use the full-size image, never the chat thumbnail.
+    let for_viewer = matches!(action, "open_viewer" | "copy_image");
     if let Some(path) = local_media_path(&msg, for_viewer) {
         finish_media_action(
             state,
@@ -205,6 +206,7 @@ pub(super) fn finish_media_action(
     match action {
         "open_viewer" => open_media_viewer(state, path, content_type, suggest_name),
         "show_folder" => show_in_folder(path),
+        "copy_image" => copy_image_to_clipboard(state, path),
         "save_dialog" => save_media_as(state, path, suggest_name, content_type),
         "play_audio" => {
             if let Err(e) = play_audio_file(path, &state.config.borrow().audio_output) {
@@ -215,6 +217,19 @@ pub(super) fn finish_media_action(
             }
         }
         _ => save_media_as(state, path, suggest_name, content_type),
+    }
+}
+
+pub(super) fn copy_image_to_clipboard(state: &AppState, path: &str) {
+    match gdk::Texture::from_filename(path) {
+        Ok(texture) => {
+            state.window.clipboard().set_texture(&texture);
+            toast(state, &crate::i18n::t("image_copied"));
+        }
+        Err(e) => toast(
+            state,
+            &crate::i18n::tf("image_copy_failed", &[("error", &e.to_string())]),
+        ),
     }
 }
 
@@ -624,6 +639,31 @@ pub(super) fn append_image_viewer(
     };
     let nat_w = base_pixbuf.width().max(1);
     let nat_h = base_pixbuf.height().max(1);
+
+    // The viewer has its own window, so bind the local file here rather than
+    // relying on the main window's message actions or the currently open chat.
+    let actions = gio::SimpleActionGroup::new();
+    let copy = gio::SimpleAction::new("copy", None);
+    let s = state.clone();
+    let copy_path = path.to_string();
+    copy.connect_activate(move |_, _| copy_image_to_clipboard(&s, &copy_path));
+    actions.add_action(&copy);
+    body.insert_action_group("image", Some(&actions));
+    let menu = gio::Menu::new();
+    menu.append(Some(&crate::i18n::t("copy_image")), Some("image.copy"));
+    replies::wire_menu(body, menu);
+    let keys = gtk::EventControllerKey::new();
+    keys.connect_key_pressed(move |_, key, _, modifiers| {
+        if matches!(key, gdk::Key::c | gdk::Key::C)
+            && modifiers.contains(gdk::ModifierType::CONTROL_MASK)
+            && !modifiers.intersects(gdk::ModifierType::ALT_MASK | gdk::ModifierType::SUPER_MASK)
+        {
+            copy.activate(None);
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
+    body.add_controller(keys);
 
     // View transform: image pixel (ix,iy) -> widget (ox + ix*zoom, oy + iy*zoom).
     let zoom = Rc::new(RefCell::new(1.0_f64));

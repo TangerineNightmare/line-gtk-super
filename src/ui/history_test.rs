@@ -1,5 +1,120 @@
 use super::*;
 
+#[test]
+#[ignore = "requires a desktop display and isolated XDG directories; uses a fixture sidecar"]
+fn fixture_image_viewer_context_menu_copies_full_image() {
+    let (state, root) = fixture_state("image-copy");
+    let path = root.join("picture.png");
+    let image = Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, true, 8, 800, 600).unwrap();
+    image.fill(0x3388ccff);
+    image.savev(&path, "png", &[]).unwrap();
+    let viewer = gtk::Window::builder()
+        .default_width(1000)
+        .default_height(760)
+        .build();
+    let root_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let body = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .vexpand(true)
+        .build();
+    media::append_image_viewer(&state, &bar, &body, path.to_str().unwrap(), &viewer);
+    root_box.append(&bar);
+    root_box.append(&body);
+    viewer.set_child(Some(&root_box));
+    viewer.present();
+    settle();
+    // Copy stays bound to this viewer even after navigating away from its chat.
+    *state.current_chat.borrow_mut() = None;
+    let controllers = body.observe_controllers();
+    let keys: Vec<_> = (0..controllers.n_items())
+        .filter_map(|i| {
+            controllers
+                .item(i)?
+                .downcast::<gtk::EventControllerKey>()
+                .ok()
+        })
+        .collect();
+    let click = (0..controllers.n_items())
+        .find_map(|i| controllers.item(i)?.downcast::<gtk::GestureClick>().ok())
+        .unwrap();
+    assert_eq!(click.button(), 3);
+    assert_eq!(click.propagation_phase(), gtk::PropagationPhase::Capture);
+    for dark in [false, true] {
+        libadwaita::StyleManager::default().set_color_scheme(if dark {
+            libadwaita::ColorScheme::ForceDark
+        } else {
+            libadwaita::ColorScheme::ForceLight
+        });
+        click.emit_by_name::<()>("pressed", &[&1i32, &200f64, &200f64]);
+        settle();
+        let menu = find(body.upcast_ref(), &|w| w.is::<gtk::PopoverMenu>())
+            .unwrap()
+            .downcast::<gtk::PopoverMenu>()
+            .unwrap();
+        assert!(menu.is_mapped());
+        let model = menu.menu_model().unwrap();
+        assert_eq!(
+            model.item_attribute_value(0, "label", None).unwrap().str(),
+            Some(crate::i18n::t("copy_image").as_str())
+        );
+        let paintable = gtk::WidgetPaintable::new(Some(&menu));
+        let snapshot = gtk::Snapshot::new();
+        paintable.snapshot(&snapshot, menu.width() as f64, menu.height() as f64);
+        let renderer = gtk::gsk::CairoRenderer::new();
+        renderer.realize(None::<&gdk::Surface>).unwrap();
+        renderer
+            .render_texture(snapshot.to_node().unwrap(), None)
+            .save_to_png(root.join(if dark {
+                "copy-menu-dark.png"
+            } else {
+                "copy-menu-light.png"
+            }))
+            .unwrap();
+        renderer.unrealize();
+        body.activate_action("image.copy", None).unwrap();
+        let texture = glib::MainContext::default()
+            .block_on(state.window.clipboard().read_texture_future())
+            .unwrap()
+            .unwrap();
+        assert_eq!((texture.width(), texture.height()), (800, 600));
+        let expected = gdk::Texture::from_filename(&path).unwrap();
+        let mut actual_pixels = vec![0; 800 * 600 * 4];
+        let mut expected_pixels = actual_pixels.clone();
+        texture.download(&mut actual_pixels, 800 * 4);
+        expected.download(&mut expected_pixels, 800 * 4);
+        assert_eq!(actual_pixels, expected_pixels);
+        menu.popdown();
+        settle();
+    }
+    assert!(keys.iter().any(|key| key.emit_by_name::<bool>(
+        "key-pressed",
+        &[&gdk::Key::Menu, &0u32, &gdk::ModifierType::empty()]
+    )));
+    settle();
+    let menu = find(body.upcast_ref(), &|w| w.is::<gtk::PopoverMenu>()).unwrap();
+    assert!(menu.is_mapped());
+    menu.downcast::<gtk::PopoverMenu>().unwrap().popdown();
+    settle();
+    state
+        .window
+        .clipboard()
+        .set_text("replace previous clipboard");
+    assert!(keys.iter().any(|key| key.emit_by_name::<bool>(
+        "key-pressed",
+        &[&gdk::Key::c, &0u32, &gdk::ModifierType::CONTROL_MASK]
+    )));
+    let texture = glib::MainContext::default()
+        .block_on(state.window.clipboard().read_texture_future())
+        .unwrap()
+        .unwrap();
+    assert_eq!((texture.width(), texture.height()), (800, 600));
+    viewer.close();
+    state.window.destroy();
+    let _ = state.sidecar.request("fixture_exit", None);
+    println!("Image copy screenshots: {}", root.display());
+}
+
 pub(super) fn settle() {
     let context = glib::MainContext::default();
     let until = Instant::now() + Duration::from_millis(250);

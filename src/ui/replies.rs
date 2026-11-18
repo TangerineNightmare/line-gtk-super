@@ -278,6 +278,10 @@ pub(super) fn wire_context(bubble: &gtk::Box, message: &MessageInfo) {
     {
         return;
     }
+    wire_menu(bubble, menu(message));
+}
+
+pub(super) fn wire_menu(bubble: &gtk::Box, menu: gio::Menu) {
     // 仮想リストから行が外れたら、開いているメニューも片付ける。
     bubble.connect_unrealize(|bubble| {
         let mut child = bubble.first_child();
@@ -288,7 +292,6 @@ pub(super) fn wire_context(bubble: &gtk::Box, message: &MessageInfo) {
             }
         }
     });
-    let menu = menu(message);
     let click = gtk::GestureClick::new();
     click.set_button(3);
     click.set_propagation_phase(gtk::PropagationPhase::Capture);
