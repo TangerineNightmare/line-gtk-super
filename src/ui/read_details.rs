@@ -25,6 +25,41 @@ pub(super) struct Slot {
     status: gtk::Label,
     readers: gtk::Button,
     people: Vec<(String, String, Option<gdk::Texture>)>,
+    reader_mids: Vec<String>,
+}
+
+// 連続する自分のメッセージで既読者が同じなら、最新の1件だけに表示する。
+// items は ID の昇順。空の既読者は常に非表示。
+fn visible_flags(items: &[(u128, &[String])]) -> Vec<bool> {
+    (0..items.len())
+        .map(|i| {
+            let set = items[i].1;
+            !set.is_empty() && items.get(i + 1).is_none_or(|next| next.1 != set)
+        })
+        .collect()
+}
+
+pub(super) fn collapse(state: &AppState) {
+    let mut slots = state.receipt_slots.borrow_mut();
+    let mut order: Vec<(u128, &str)> = slots
+        .iter()
+        .filter(|(_, slot)| !slot.send_unknown)
+        .filter_map(|(id, _)| crate::read_receipts::message_id(id).map(|n| (n, id.as_str())))
+        .collect();
+    order.sort_unstable();
+    let flags = {
+        let items: Vec<(u128, &[String])> = order
+            .iter()
+            .map(|(n, id)| (*n, slots[*id].reader_mids.as_slice()))
+            .collect();
+        visible_flags(&items)
+    };
+    let ids: Vec<String> = order.iter().map(|(_, id)| id.to_string()).collect();
+    for (id, visible) in ids.iter().zip(flags) {
+        if let Some(slot) = slots.get_mut(id) {
+            slot.readers.set_visible(visible);
+        }
+    }
 }
 
 pub(super) fn send_unknown(state: &AppState, id: &str) {
@@ -88,6 +123,7 @@ pub(super) fn metadata(state: &AppState, message: &MessageInfo) -> gtk::Box {
         status,
         readers,
         people: Vec::new(),
+        reader_mids: Vec::new(),
     };
     update(state, &mut slot, &message.id, message.created_time);
     row.append(&slot.status);
@@ -96,6 +132,7 @@ pub(super) fn metadata(state: &AppState, message: &MessageInfo) -> gtk::Box {
         .receipt_slots
         .borrow_mut()
         .insert(message.id.clone(), slot);
+    collapse(state);
     row
 }
 
@@ -214,6 +251,7 @@ pub(super) fn update(state: &AppState, slot: &mut Slot, id: &str, created_time: 
     slot.readers
         .update_property(&[gtk::accessible::Property::Label(&description)]);
     slot.readers.set_visible(!mids.is_empty());
+    slot.reader_mids = mids;
 }
 
 fn open(state: &AppState, id: &str) {
@@ -329,6 +367,50 @@ pub(super) fn refresh(state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn set(mids: &[&str]) -> Vec<String> {
+        mids.iter().map(|m| m.to_string()).collect()
+    }
+
+    fn flags(sets: &[Vec<String>]) -> Vec<bool> {
+        let items: Vec<(u128, &[String])> = sets
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (i as u128, s.as_slice()))
+            .collect();
+        visible_flags(&items)
+    }
+
+    #[test]
+    fn identical_reader_runs_only_show_the_newest_message() {
+        let a = set(&["u1", "u2"]);
+        assert_eq!(
+            flags(&[a.clone(), a.clone(), a.clone()]),
+            [false, false, true]
+        );
+    }
+
+    #[test]
+    fn unread_newer_message_keeps_older_readers_visible() {
+        let a = set(&["u1"]);
+        assert_eq!(flags(&[a.clone(), a, Vec::new()]), [false, true, false]);
+    }
+
+    #[test]
+    fn growing_or_different_reader_sets_break_the_run() {
+        let a = set(&["u1"]);
+        let ab = set(&["u1", "u2"]);
+        assert_eq!(
+            flags(&[a.clone(), ab.clone(), ab, a]),
+            [true, false, true, true]
+        );
+    }
+
+    #[test]
+    fn empty_reader_sets_are_never_visible() {
+        assert_eq!(flags(&[Vec::new(), Vec::new()]), [false, false]);
+        assert!(flags(&[]).is_empty());
+    }
 
     #[test]
     #[ignore = "requires a desktop display; uses a fixture sidecar and no LINE account"]

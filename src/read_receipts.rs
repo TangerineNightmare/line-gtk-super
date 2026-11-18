@@ -6,7 +6,7 @@ pub struct ReadReceipts {
     chats: HashMap<String, HashMap<String, Vec<(u128, u128)>>>,
 }
 
-fn message_id(value: &str) -> Option<u128> {
+pub(crate) fn message_id(value: &str) -> Option<u128> {
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }

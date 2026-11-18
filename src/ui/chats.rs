@@ -675,10 +675,13 @@ pub(super) fn toggle_chat_mute(state: &AppState) {
 
 // 表示している行だけを更新し、スクロール位置と本文は維持する。
 pub(super) fn refresh_read_labels(state: &AppState) {
-    let times = state.msg_created.borrow();
-    for (id, slot) in state.receipt_slots.borrow_mut().iter_mut() {
-        read_details::update(state, slot, id, times.get(id).copied().unwrap_or(0));
+    {
+        let times = state.msg_created.borrow();
+        for (id, slot) in state.receipt_slots.borrow_mut().iter_mut() {
+            read_details::update(state, slot, id, times.get(id).copied().unwrap_or(0));
+        }
     }
+    read_details::collapse(state);
     read_details::refresh(state);
 }
 

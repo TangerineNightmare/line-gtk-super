@@ -95,6 +95,7 @@ pub(super) fn apply(state: &AppState, account: &str, chat_mid: &str, id: &str) {
     state.media_msgs.borrow_mut().remove(id);
     state.media_ready_paths.borrow_mut().remove(id);
     state.receipt_slots.borrow_mut().remove(id);
+    read_details::collapse(state);
     state.msg_created.borrow_mut().remove(id);
     reactions::forget(state, id);
     let incoming = state
