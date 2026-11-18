@@ -1096,8 +1096,8 @@ fn wire_scroll_pin(state: &AppState) {
     let s = state.clone();
     let adj = state.message_scroll.vadjustment();
     adj.connect_value_changed(move |adj| {
-        // Ignore programmatic pins (append / layout settle / changed snap).
-        if *s.scroll_pinning.borrow() {
+        // Navigation-driven adjustments must not enable bottom pinning.
+        if *s.scroll_pinning.borrow() || history::is_navigating(&s) {
             return;
         }
         let target = (adj.upper() - adj.page_size()).max(0.0);

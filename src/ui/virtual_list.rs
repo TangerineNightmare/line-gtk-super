@@ -40,8 +40,6 @@ struct Edges {
     bottom: Sentinel,
     top_on: Cell<bool>,
     bottom_on: Cell<bool>,
-    top_bound: Cell<bool>,
-    bottom_bound: Cell<bool>,
     handler: RefCell<Option<EdgeHandler>>,
     retry_handler: RefCell<Option<EdgeHandler>>,
 }
@@ -134,6 +132,9 @@ impl Sentinel {
 /// The model owns row widgets while the factory only attaches rows currently
 /// needed by GTK. Optional sentinel rows at both ends report when they are
 /// scrolled into view, which is how older or newer history gets requested.
+///
+/// Viewport stability is delegated to GTK: it keeps its scroll anchor on an item
+/// across model changes, so nothing here writes the adjustment after a change.
 #[derive(Clone)]
 pub struct VirtualMessageList {
     view: gtk::ListView,
@@ -153,8 +154,6 @@ impl VirtualMessageList {
             bottom: Sentinel::new(),
             top_on: Cell::new(false),
             bottom_on: Cell::new(false),
-            top_bound: Cell::new(false),
-            bottom_bound: Cell::new(false),
             handler: RefCell::new(None),
             retry_handler: RefCell::new(None),
         });
@@ -181,23 +180,13 @@ impl VirtualMessageList {
             let widget = item.borrow::<gtk::Widget>().clone();
             list_item.set_child(Some(&widget));
             if widget == *bind_edges.top.row.upcast_ref::<gtk::Widget>() {
-                bind_edges.top_bound.set(true);
                 bind_edges.fire_later(Edge::Top);
             } else if widget == *bind_edges.bottom.row.upcast_ref::<gtk::Widget>() {
-                bind_edges.bottom_bound.set(true);
                 bind_edges.fire_later(Edge::Bottom);
             }
         });
-        let unbind_edges = edges.clone();
         factory.connect_unbind(move |_, object| {
             if let Some(list_item) = object.downcast_ref::<gtk::ListItem>() {
-                if let Some(child) = list_item.child() {
-                    if child == *unbind_edges.top.row.upcast_ref::<gtk::Widget>() {
-                        unbind_edges.top_bound.set(false);
-                    } else if child == *unbind_edges.bottom.row.upcast_ref::<gtk::Widget>() {
-                        unbind_edges.bottom_bound.set(false);
-                    }
-                }
                 list_item.set_child(None::<&gtk::Widget>);
             }
         });
@@ -358,8 +347,6 @@ impl VirtualMessageList {
         *self.current_owner.borrow_mut() = None;
         self.edges.top_on.set(false);
         self.edges.bottom_on.set(false);
-        self.edges.top_bound.set(false);
-        self.edges.bottom_bound.set(false);
         self.edges.top.update(Edge::Top, HistoryStatus::Ready);
         self.edges.bottom.update(Edge::Bottom, HistoryStatus::Ready);
     }
@@ -370,6 +357,29 @@ impl VirtualMessageList {
             return None;
         }
         self.item_at(first as u32)
+    }
+
+    /// Anchor the view on a message that is fully on screen.
+    ///
+    /// GTK anchors on the sentinel while the list sits at the very top, and rows
+    /// inserted below that sentinel would push the content down. Call this before
+    /// adding or removing rows outside the viewport. It never moves the view: GTK
+    /// computes no scroll for a row that is already fully visible.
+    pub fn anchor_on_visible_row(&self) {
+        let height = self.view.height() as f32;
+        let (first, end) = (self.first_real(), self.end_real());
+        let rows = (first..end).filter_map(|index| {
+            // A landing page can delete the day separator it continues.
+            let row = self
+                .item_at(index as u32)
+                .filter(|row| row.is_mapped() && !row.has_css_class("line-day-sep-row"))?;
+            let rect = row.compute_bounds(&self.view)?;
+            Some((index, rect.y(), rect.y() + rect.height()))
+        });
+        if let Some(index) = first_fully_visible(rows, height) {
+            self.view
+                .scroll_to(index as u32, gtk::ListScrollFlags::NONE, None);
+        }
     }
 
     pub fn queue_allocate(&self) {
@@ -417,10 +427,6 @@ impl VirtualMessageList {
             self.store.remove(at as u32);
             self.owners.borrow_mut().remove(at);
             sentinel.spinner.set_spinning(false);
-            match edge {
-                Edge::Top => self.edges.top_bound.set(false),
-                Edge::Bottom => self.edges.bottom_bound.set(false),
-            }
         }
         flag.set(on);
     }
@@ -429,14 +435,6 @@ impl VirtualMessageList {
         match edge {
             Edge::Top => self.edges.top.update(edge, status),
             Edge::Bottom => self.edges.bottom.update(edge, status),
-        }
-    }
-
-    /// Whether a shown sentinel is currently attached to the view.
-    pub fn sentinel_in_view(&self, edge: Edge) -> bool {
-        match edge {
-            Edge::Top => self.edges.top_on.get() && self.edges.top_bound.get(),
-            Edge::Bottom => self.edges.bottom_on.get() && self.edges.bottom_bound.get(),
         }
     }
 
@@ -517,6 +515,16 @@ impl VirtualMessageList {
             .and_downcast::<gtk::glib::BoxedAnyObject>()?;
         Some(item.borrow::<gtk::Widget>().clone())
     }
+}
+
+/// First `(index, top, bottom)` row lying entirely inside a viewport of `height`.
+fn first_fully_visible(
+    rows: impl Iterator<Item = (usize, f32, f32)>,
+    height: f32,
+) -> Option<usize> {
+    rows.into_iter()
+        .find(|&(_, top, bottom)| top >= 0.0 && bottom <= height)
+        .map(|(index, _, _)| index)
 }
 
 /// Item range of a message's own rows, without a day separator in front.
@@ -677,6 +685,19 @@ mod tests {
         assert_eq!(body_range(&items, 1, 7, "c", |i| i == 4), Some(5..6));
         assert_eq!(body_range(&items, 1, 7, "b", |_| false), Some(3..4));
         assert_eq!(body_range(&items, 1, 7, "missing", |_| false), None);
+    }
+
+    #[test]
+    fn anchors_on_the_first_row_entirely_inside_the_viewport() {
+        let rows = [(1, -20.0, 30.0), (2, 30.0, 90.0), (3, 90.0, 900.0)];
+        assert_eq!(first_fully_visible(rows.into_iter(), 400.0), Some(2));
+        // A row touching the top edge is still fully visible.
+        let rows = [(1, 0.0, 30.0)];
+        assert_eq!(first_fully_visible(rows.into_iter(), 400.0), Some(1));
+        // A single message taller than the viewport cannot be an exact anchor.
+        let rows = [(1, -20.0, 500.0)];
+        assert_eq!(first_fully_visible(rows.into_iter(), 400.0), None);
+        assert_eq!(first_fully_visible(std::iter::empty(), 400.0), None);
     }
 
     #[test]

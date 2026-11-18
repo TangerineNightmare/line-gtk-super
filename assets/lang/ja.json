@@ -620,6 +620,7 @@
   "mention_load_failed": "メンバーを読み込めませんでした。再試行 (F5)。",
   "mention_no_members": "一致するメンバーがいません",
   "notification_group_mention": "{sender}さんが{group}であなたをメンションしました",
+  "reply_loading_original": "元のメッセージを読み込み中…",
   "reply_open_original": "元のメッセージを開く",
   "reply_original_unavailable": "元のメッセージが見つかりませんでした。",
   "user_profile_title": "プロフィール",

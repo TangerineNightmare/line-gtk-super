@@ -11,6 +11,11 @@ pub(super) const WINDOW_MAX: usize = 200;
 /// A long-running live chat is trimmed back to `WINDOW_MAX` past this size.
 const LIVE_TRIM_AT: usize = 300;
 const COOLDOWN: Duration = Duration::from_millis(400);
+/// The list counts as still moving this long after the last scroll change.
+const SCROLL_QUIET: Duration = Duration::from_millis(150);
+/// Never keep a page waiting for a scroll that does not end.
+const MAX_HOLD: Duration = Duration::from_secs(3);
+const LANDING_POLL: Duration = Duration::from_millis(40);
 const RETRY_DELAY: Duration = Duration::from_secs(3);
 const MAX_FAILURES: u8 = 3;
 /// Keep a missing or very old quote from walking the entire account history.
@@ -23,6 +28,16 @@ struct Navigation {
     generation: u64,
     pages: u32,
     settling_until: Option<Instant>,
+    feedback: Option<libadwaita::Toast>,
+    token: Rc<()>,
+}
+
+impl Drop for Navigation {
+    fn drop(&mut self) {
+        if let Some(feedback) = self.feedback.take() {
+            feedback.dismiss();
+        }
+    }
 }
 
 impl Navigation {
@@ -47,9 +62,80 @@ pub(super) struct HistoryWindow {
     newer_ready_at: Option<Instant>,
     older_failures: u8,
     newer_failures: u8,
+    older_scroll_required: bool,
+    newer_scroll_required: bool,
+    /// Pages received while the reader was still scrolling.
+    held: Vec<HeldPage>,
+    last_scroll_at: Option<Instant>,
+}
+
+/// A fetched page that has not changed the list yet. Its request stays open
+/// until it lands, so the loading row stays up and no duplicate is requested.
+struct HeldPage {
+    request_id: u64,
+    edge: Edge,
+    chat_mid: String,
+    generation: u64,
+    messages: Vec<MessageInfo>,
+    has_more: bool,
+    received_at: Instant,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Landing {
+    Now,
+    Hold,
+    StopMomentumThenNow,
+}
+
+/// Kinetic scrolling and scrollbar drags set absolute positions, so changing
+/// the rows under them sends the view somewhere else. Wait for the movement to
+/// end unless the reader is about to run out of loaded messages.
+fn landing_for(
+    moving: bool,
+    navigating: bool,
+    held_for: Duration,
+    runway: f64,
+    page_size: f64,
+) -> Landing {
+    if navigating || !moving {
+        Landing::Now
+    } else if runway < page_size || held_for >= MAX_HOLD {
+        Landing::StopMomentumThenNow
+    } else {
+        Landing::Hold
+    }
+}
+
+/// The edge a scroll moved toward. GTK also moves the adjustment to follow its
+/// anchor when rows change size or arrive, and then `upper` changes with it.
+fn scrolled_toward(before: f64, upper_before: f64, value: f64, upper: f64) -> Option<Edge> {
+    if upper != upper_before {
+        None
+    } else if value < before {
+        Some(Edge::Top)
+    } else if value > before {
+        Some(Edge::Bottom)
+    } else {
+        None
+    }
 }
 
 impl HistoryWindow {
+    fn scroll_required(&self, edge: Edge) -> bool {
+        match edge {
+            Edge::Top => self.older_scroll_required,
+            Edge::Bottom => self.newer_scroll_required,
+        }
+    }
+
+    fn set_scroll_required(&mut self, edge: Edge, required: bool) {
+        match edge {
+            Edge::Top => self.older_scroll_required = required,
+            Edge::Bottom => self.newer_scroll_required = required,
+        }
+    }
+
     fn request(&mut self, edge: Edge) -> &mut Option<u64> {
         match edge {
             Edge::Top => &mut self.older_request,
@@ -206,6 +292,8 @@ pub(super) fn shared_context_response(
         generation,
         pages: 0,
         settling_until: None,
+        feedback: None,
+        token: Rc::new(()),
     };
     if !*state.session_ready.borrow()
         || !owner.matches(
@@ -323,6 +411,22 @@ pub(super) fn jump_to_message(state: &AppState, message_id: &str) {
     let Some(chat_mid) = state.current_chat.borrow().clone() else {
         return;
     };
+    if state
+        .history
+        .borrow()
+        .navigation
+        .as_ref()
+        .is_some_and(|nav| {
+            nav.message_id == message_id
+                && nav.matches(
+                    Some(&chat_mid),
+                    state.self_mid.borrow().as_deref(),
+                    *state.history_request_generation.borrow(),
+                )
+        })
+    {
+        return;
+    }
     *state.stick_bottom.borrow_mut() = false;
     *state.scroll_pin_gen.borrow_mut() += 1;
     *state.scroll_pinning.borrow_mut() = false;
@@ -333,11 +437,38 @@ pub(super) fn jump_to_message(state: &AppState, message_id: &str) {
         generation: *state.history_request_generation.borrow(),
         pages: 0,
         settling_until: None,
+        feedback: None,
+        token: Rc::new(()),
     });
     if advance_navigation(state) {
+        // Keep feedback visible even while the older-page sentinel is offscreen.
+        let mut history = state.history.borrow_mut();
+        if let Some(nav) = history.navigation.as_mut()
+            && nav.settling_until.is_none()
+        {
+            let content = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let spinner = gtk::Spinner::builder().spinning(true).build();
+            content.append(&spinner);
+            content.append(&gtk::Label::new(Some(&crate::i18n::t(
+                "reply_loading_original",
+            ))));
+            let feedback = libadwaita::Toast::builder()
+                .custom_title(&content)
+                .timeout(0)
+                .build();
+            state.toast_overlay.add_toast(feedback.clone());
+            nav.feedback = Some(feedback);
+        }
+        let token = history.navigation.as_ref().map(|nav| nav.token.clone());
+        drop(history);
         let s = state.clone();
         glib::timeout_add_local(Duration::from_millis(150), move || {
-            if advance_navigation(&s) {
+            let current = s.history.borrow().navigation.as_ref().is_some_and(|nav| {
+                token
+                    .as_ref()
+                    .is_some_and(|token| Rc::ptr_eq(token, &nav.token))
+            });
+            if current && advance_navigation(&s) {
                 glib::ControlFlow::Continue
             } else {
                 glib::ControlFlow::Break
@@ -364,6 +495,13 @@ fn advance_navigation(state: &AppState) -> bool {
         }
         nav.message_id.clone()
     };
+    // An offline session cannot fetch the missing pages. Keep already loaded
+    // targets usable, but end unavailable jumps instead of polling forever.
+    if !*state.session_ready.borrow() && !state.reply_messages.borrow().contains_key(&target) {
+        state.history.borrow_mut().navigation = None;
+        toast(state, &crate::i18n::t("history_waiting"));
+        return false;
+    }
     // Do not jump through a response still changing the window, or through
     // the initial chunked render which would pin the view back to the newest.
     {
@@ -382,9 +520,14 @@ fn advance_navigation(state: &AppState) -> bool {
         .navigation
         .as_ref()
         .and_then(|nav| nav.settling_until);
-    if settling_until.is_some_and(|until| Instant::now() >= until) {
-        state.history.borrow_mut().navigation = None;
-        return false;
+    if let Some(until) = settling_until {
+        if Instant::now() >= until {
+            state.history.borrow_mut().navigation = None;
+            return false;
+        }
+        // GTK owns the pending scroll and allocation. Reissuing scroll_to with
+        // FOCUS here restarts that work and can visibly bounce between rows.
+        return true;
     }
     *state.stick_bottom.borrow_mut() = false;
     if state.message_list.scroll_to_message(&target) {
@@ -399,8 +542,7 @@ fn advance_navigation(state: &AppState) -> bool {
                 });
             }
         }
-        // Keep sentinel callbacks suppressed while GTK allocates and moves the
-        // virtual rows. Repeating also handles an offscreen row's first bind.
+        // Keep sentinel callbacks suppressed while GTK completes this scroll.
         return true;
     }
     let oldest = state.message_list.edge_owner(true, |_| true);
@@ -434,13 +576,16 @@ fn passed_target(oldest: &str, target: &str) -> bool {
 
 pub(super) fn wire(state: &AppState) {
     let s = state.clone();
-    state
-        .message_list
-        .set_edge_handler(move |edge| on_edge(&s, edge));
+    state.message_list.set_edge_handler(move |edge| {
+        if near_edge(&s, edge) {
+            on_edge(&s, edge);
+        }
+    });
     let s = state.clone();
     state.message_list.set_retry_handler(move |edge| {
         {
             let mut history = s.history.borrow_mut();
+            history.set_scroll_required(edge, false);
             match edge {
                 Edge::Top => {
                     history.older_failures = 0;
@@ -455,28 +600,37 @@ pub(super) fn wire(state: &AppState) {
         restore_sentinels(&s);
         on_edge(&s, edge);
     });
-    // A sentinel only reports when it first comes into view. Watching the
-    // scroll position as well keeps paging going when it stays attached.
+    // Only movement toward an edge rearms paging after a successful page.
+    // Anchor restoration also changes the adjustment and must not rearm it.
     let s = state.clone();
+    let adj = state.message_scroll.vadjustment();
+    let previous = Cell::new((adj.value(), adj.upper()));
     state
         .message_scroll
         .vadjustment()
-        .connect_value_changed(move |_| {
+        .connect_value_changed(move |adj| {
+            let (before, upper_before) = previous.replace((adj.value(), adj.upper()));
             if *s.scroll_pinning.borrow() {
                 return;
             }
-            for edge in [Edge::Top, Edge::Bottom] {
-                if near_edge(&s, edge) {
-                    on_edge(&s, edge);
-                }
+            s.history.borrow_mut().last_scroll_at = Some(Instant::now());
+            let Some(edge) = scrolled_toward(before, upper_before, adj.value(), adj.upper()) else {
+                return;
+            };
+            s.history.borrow_mut().set_scroll_required(edge, false);
+            if near_edge(&s, edge) {
+                on_edge(&s, edge);
             }
         });
 }
 
-/// Within a screen or two of the end of the list that has more history.
+/// Start older pages early enough to cover fast upward scrolling.
 fn near_edge(state: &AppState, edge: Edge) -> bool {
     let adj = state.message_scroll.vadjustment();
-    let margin = (adj.page_size() * 1.5).max(600.0);
+    let margin = match edge {
+        Edge::Top => (adj.page_size() * 2.5).max(1000.0),
+        Edge::Bottom => (adj.page_size() * 1.5).max(600.0),
+    };
     match edge {
         Edge::Top => adj.value() < margin,
         Edge::Bottom => adj.upper() - adj.value() - adj.page_size() < margin,
@@ -528,6 +682,10 @@ pub(super) fn restore_sentinels(state: &AppState) {
     state
         .message_list
         .set_sentinel(Edge::Bottom, history.has_more_newer);
+}
+
+pub(super) fn is_navigating(state: &AppState) -> bool {
+    state.history.borrow().navigation.is_some()
 }
 
 pub(super) fn is_detached(state: &AppState) -> bool {
@@ -588,10 +746,17 @@ fn is_real_message(state: &AppState, id: &str) -> bool {
 }
 
 fn on_edge(state: &AppState, edge: Edge) {
+    if *state.scroll_pinning.borrow() {
+        // The first render pins the list to the newest message. A short chat
+        // cannot be scrolled, so nothing else would ask again afterwards.
+        recheck_after(state, edge, Duration::from_millis(200));
+        return;
+    }
     let ready = {
         let history = state.history.borrow();
         history.armed
             && history.navigation.is_none()
+            && !history.scroll_required(edge)
             && match edge {
                 Edge::Top => history.has_more_older,
                 Edge::Bottom => history.has_more_newer,
@@ -684,8 +849,8 @@ fn request(state: &AppState, edge: Edge) {
     }
 }
 
-/// Look again at an edge after a delay: a retry after a failure, or a short
-/// list whose sentinel never leaves the view.
+/// Recheck the scroll position after the page settles, including when scroll
+/// signals were suppressed while restoring its anchor.
 fn recheck_after(state: &AppState, edge: Edge, wait: Duration) {
     let s = state.clone();
     let generation = *state.history_request_generation.borrow();
@@ -700,7 +865,13 @@ fn recheck_after(state: &AppState, edge: Edge, wait: Duration) {
         }
         if *s.scroll_pinning.borrow() {
             recheck_after(&s, edge, Duration::from_millis(200));
-        } else if s.message_list.sentinel_in_view(edge) || near_edge(&s, edge) {
+        } else if near_edge(&s, edge) {
+            // A short conversation may need more than one page to fill the
+            // viewport. Longer lists wait for the reader to scroll again.
+            let adj = s.message_scroll.vadjustment();
+            if adj.upper() <= adj.page_size() {
+                s.history.borrow_mut().set_scroll_required(edge, false);
+            }
             on_edge(&s, edge);
         }
     });
@@ -747,6 +918,113 @@ pub(super) fn response(
         } => (Edge::Bottom, chat_mid, generation),
         _ => return,
     };
+    if *state.history.borrow_mut().request(edge) != Some(request_id) {
+        return;
+    }
+    let current = generation == *state.history_request_generation.borrow()
+        && state.current_chat.borrow().as_deref() == Some(chat_mid.as_str());
+    if !current || !ok {
+        *state.history.borrow_mut().request(edge) = None;
+        if current {
+            tracing::warn!(?edge, "[history] page request failed");
+            page_failed(state, edge);
+        }
+        return;
+    }
+    let messages = parse_messages(result);
+    let has_more = result
+        .get("hasMore")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    tracing::info!(
+        ?edge,
+        received = messages.len(),
+        has_more,
+        "[history] page received"
+    );
+    let page = HeldPage {
+        request_id,
+        edge,
+        chat_mid,
+        generation,
+        messages,
+        has_more,
+        received_at: Instant::now(),
+    };
+    if let Some(page) = land_unless_scrolling(state, page) {
+        let first = {
+            let mut history = state.history.borrow_mut();
+            history.held.push(page);
+            history.held.len() == 1
+        };
+        if first {
+            poll_held_pages(state);
+        }
+    }
+}
+
+/// Land `page` now, or hand it back while the reader is still scrolling.
+fn land_unless_scrolling(state: &AppState, page: HeldPage) -> Option<HeldPage> {
+    let adj = state.message_scroll.vadjustment();
+    let runway = match page.edge {
+        Edge::Top => adj.value(),
+        Edge::Bottom => adj.upper() - adj.value() - adj.page_size(),
+    };
+    let (moving, navigating) = {
+        let history = state.history.borrow();
+        (
+            history
+                .last_scroll_at
+                .is_some_and(|at| at.elapsed() < SCROLL_QUIET),
+            history.navigation.is_some(),
+        )
+    };
+    let held_for = page.received_at.elapsed();
+    match landing_for(moving, navigating, held_for, runway, adj.page_size()) {
+        Landing::Hold => return Some(page),
+        Landing::StopMomentumThenNow => stop_momentum(&state.message_scroll),
+        Landing::Now => {}
+    }
+    land(state, page);
+    None
+}
+
+/// Toggling the property is the only public way to cancel a GTK deceleration.
+fn stop_momentum(scroller: &gtk::ScrolledWindow) {
+    if scroller.is_kinetic_scrolling() {
+        scroller.set_kinetic_scrolling(false);
+        scroller.set_kinetic_scrolling(true);
+    }
+}
+
+fn poll_held_pages(state: &AppState) {
+    let s = state.clone();
+    glib::timeout_add_local(LANDING_POLL, move || {
+        let waiting = std::mem::take(&mut s.history.borrow_mut().held);
+        let still_held: Vec<_> = waiting
+            .into_iter()
+            .filter_map(|page| land_unless_scrolling(&s, page))
+            .collect();
+        let mut history = s.history.borrow_mut();
+        history.held.extend(still_held);
+        if history.held.is_empty() {
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
+        }
+    });
+}
+
+fn land(state: &AppState, page: HeldPage) {
+    let HeldPage {
+        request_id,
+        edge,
+        chat_mid,
+        generation,
+        messages,
+        has_more,
+        ..
+    } = page;
     {
         let mut history = state.history.borrow_mut();
         let request = history.request(edge);
@@ -760,29 +1038,14 @@ pub(super) fn response(
     {
         return;
     }
-    if !ok {
-        tracing::warn!(?edge, "[history] page request failed");
-        page_failed(state, edge);
-        return;
-    }
     {
         let mut history = state.history.borrow_mut();
+        history.set_scroll_required(edge, true);
         match edge {
             Edge::Top => history.older_failures = 0,
             Edge::Bottom => history.newer_failures = 0,
         }
     }
-    let messages = parse_messages(result);
-    let has_more = result
-        .get("hasMore")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    tracing::info!(
-        ?edge,
-        received = messages.len(),
-        has_more,
-        "[history] page received"
-    );
     match edge {
         Edge::Top => apply_older(state, messages, has_more),
         Edge::Bottom => apply_newer(state, messages, has_more),
@@ -795,12 +1058,9 @@ pub(super) fn response(
             Edge::Bottom => history.newer_ready_at = ready_at,
         }
     }
-    // Only a list that still does not fill the view needs another page now;
-    // otherwise the user scrolling back to the sentinel asks for it.
-    let adj = state.message_scroll.vadjustment();
-    if adj.upper() <= adj.page_size() * 1.5 {
-        recheck_after(state, edge, COOLDOWN);
-    }
+    // Let allocation settle before filling a short viewport. A restored
+    // position near an edge alone must not start a chain of successful pages.
+    recheck_after(state, edge, COOLDOWN);
 }
 
 /// One malformed message must not drop the rest of the page.
@@ -840,6 +1100,7 @@ fn apply_older(state: &AppState, messages: Vec<MessageInfo>, has_more: bool) {
         restore_sentinels(state);
         return;
     }
+    begin_model_change(state);
     let oldest = state.message_list.edge_owner(true, |_| true);
     let old_first_row = state.message_list.edge_row(true);
     let junction_day = oldest.as_ref().map(|owner| day_key(owner.created));
@@ -854,7 +1115,6 @@ fn apply_older(state: &AppState, messages: Vec<MessageInfo>, has_more: bool) {
     {
         state.message_list.remove(row);
     }
-    let anchor = capture_anchor(state, true);
 
     let previous_day = state.last_msg_day.borrow().clone();
     let previous_incoming = state.last_incoming_id.borrow().clone();
@@ -879,7 +1139,7 @@ fn apply_older(state: &AppState, messages: Vec<MessageInfo>, has_more: bool) {
     }
     restore_sentinels(state);
     update_chat_subtitle(state);
-    restore_anchor(state, anchor);
+    settle_after_model_change(state);
 }
 
 fn apply_newer(state: &AppState, messages: Vec<MessageInfo>, has_more: bool) {
@@ -892,7 +1152,7 @@ fn apply_newer(state: &AppState, messages: Vec<MessageInfo>, has_more: bool) {
         reload_latest(state);
         return;
     }
-    let anchor = capture_anchor(state, false);
+    begin_model_change(state);
     for message in &fresh {
         append_message(state, message, false);
     }
@@ -906,7 +1166,7 @@ fn apply_newer(state: &AppState, messages: Vec<MessageInfo>, has_more: bool) {
     }
     restore_sentinels(state);
     update_chat_subtitle(state);
-    restore_anchor(state, anchor);
+    settle_after_model_change(state);
 }
 
 fn update_chat_subtitle(state: &AppState) {
@@ -950,6 +1210,7 @@ pub(super) fn cleanup(state: &AppState, trimmed: &Trimmed) {
         state.msg_created.borrow_mut().remove(id);
         state.media_ready_paths.borrow_mut().remove(id);
     }
+    read_details::collapse(state);
     state
         .media_queue
         .borrow_mut()
@@ -977,33 +1238,16 @@ pub(super) fn cleanup(state: &AppState, trimmed: &Trimmed) {
     }
 }
 
-struct Anchor {
-    row: Option<(gtk::Widget, f64)>,
-    upper: f64,
-    value: f64,
-    prepend: bool,
-}
-
-/// Remember where an edge row sits in the view so it can be put back after
-/// rows are added or removed around it.
-fn capture_anchor(state: &AppState, oldest: bool) -> Anchor {
+/// Prepare for rows changing around the viewport. GTK keeps the anchor row in
+/// place through the change, so it only needs a row that will still be there.
+fn begin_model_change(state: &AppState) {
     *state.stick_bottom.borrow_mut() = false;
-    let adj = state.message_scroll.vadjustment();
-    let row = state.message_list.edge_row(oldest).and_then(|row| {
-        let y = row
-            .compute_bounds(&state.message_scroll)
-            .map(|rect| rect.y() as f64)?;
-        Some((row, y))
-    });
-    Anchor {
-        row,
-        upper: adj.upper(),
-        value: adj.value(),
-        prepend: oldest,
-    }
+    state.message_list.anchor_on_visible_row();
 }
 
-fn restore_anchor(state: &AppState, anchor: Anchor) {
+/// GTK moves the adjustment while it lays out the changed rows. Treat those
+/// moves as layout rather than scrolling until the content height stops changing.
+fn settle_after_model_change(state: &AppState) {
     if state.history.borrow().navigation.is_some() {
         return;
     }
@@ -1016,40 +1260,19 @@ fn restore_anchor(state: &AppState, anchor: Anchor) {
     let s = state.clone();
     let frames = Cell::new(0_u32);
     let steady = Cell::new(0_u32);
+    let upper = Cell::new(state.message_scroll.vadjustment().upper());
     state.message_scroll.add_tick_callback(move |_, _| {
         if *s.scroll_pin_gen.borrow() != generation {
             return glib::ControlFlow::Break;
         }
         frames.set(frames.get() + 1);
-        let adj = s.message_scroll.vadjustment();
-        let measured = anchor
-            .row
-            .as_ref()
-            .and_then(|(row, wanted)| Some((row.compute_bounds(&s.message_scroll)?, *wanted)));
-        match measured {
-            Some((rect, wanted_y)) => {
-                let delta = rect.y() as f64 - wanted_y;
-                if delta.abs() > 0.5 {
-                    adj.set_value(adj.value() + delta);
-                    steady.set(0);
-                } else {
-                    steady.set(steady.get() + 1);
-                }
-            }
-            None if anchor.prepend => {
-                // The row is not on screen yet: keep the same distance from the
-                // bottom by the amount the content grew.
-                let wanted = anchor.value + (adj.upper() - anchor.upper);
-                if (adj.value() - wanted).abs() > 0.5 {
-                    adj.set_value(wanted);
-                    steady.set(0);
-                } else {
-                    steady.set(steady.get() + 1);
-                }
-            }
-            None => steady.set(steady.get() + 1),
+        let current = s.message_scroll.vadjustment().upper();
+        if upper.replace(current) == current {
+            steady.set(steady.get() + 1);
+        } else {
+            steady.set(0);
         }
-        if steady.get() >= 6 || frames.get() >= 90 {
+        if steady.get() >= 3 || frames.get() >= 30 {
             *s.scroll_pinning.borrow_mut() = false;
             return glib::ControlFlow::Break;
         }
@@ -1060,6 +1283,10 @@ fn restore_anchor(state: &AppState, anchor: Anchor) {
 #[cfg(test)]
 #[path = "history_test.rs"]
 mod integration_tests;
+
+#[cfg(test)]
+#[path = "history_scroll_test.rs"]
+mod scroll_tests;
 
 #[cfg(test)]
 mod navigation_tests {
@@ -1074,6 +1301,8 @@ mod navigation_tests {
             generation: 4,
             pages: 0,
             settling_until: None,
+            feedback: None,
+            token: Rc::new(()),
         };
         assert!(nav.matches(Some("group"), Some("alice"), 4));
         assert!(!nav.matches(Some("other"), Some("alice"), 4));
@@ -1081,6 +1310,44 @@ mod navigation_tests {
         assert!(!nav.matches(Some("group"), None, 4));
         assert!(!nav.matches(Some("group"), Some("alice"), 5));
         assert!(!nav.matches(None, Some("alice"), 4));
+    }
+
+    #[test]
+    fn pages_wait_for_a_moving_list_unless_the_reader_would_run_out() {
+        let idle = Duration::ZERO;
+        assert_eq!(landing_for(false, false, idle, 5000.0, 800.0), Landing::Now);
+        assert_eq!(landing_for(true, false, idle, 5000.0, 800.0), Landing::Hold);
+        assert_eq!(
+            landing_for(true, false, idle, 100.0, 800.0),
+            Landing::StopMomentumThenNow
+        );
+        assert_eq!(
+            landing_for(true, false, MAX_HOLD, 5000.0, 800.0),
+            Landing::StopMomentumThenNow
+        );
+    }
+
+    #[test]
+    fn a_jump_in_progress_never_waits_for_a_page() {
+        assert_eq!(
+            landing_for(true, true, Duration::ZERO, 5000.0, 800.0),
+            Landing::Now
+        );
+    }
+
+    #[test]
+    fn only_moves_without_a_content_change_count_as_scrolling() {
+        assert_eq!(
+            scrolled_toward(500.0, 9000.0, 450.0, 9000.0),
+            Some(Edge::Top)
+        );
+        assert_eq!(
+            scrolled_toward(500.0, 9000.0, 550.0, 9000.0),
+            Some(Edge::Bottom)
+        );
+        assert_eq!(scrolled_toward(500.0, 9000.0, 500.0, 9000.0), None);
+        // A prepended page moves the value and the height together.
+        assert_eq!(scrolled_toward(500.0, 9000.0, 4000.0, 12500.0), None);
     }
 
     #[test]
