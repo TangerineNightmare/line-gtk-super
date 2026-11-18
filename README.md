@@ -56,6 +56,7 @@ Everything checked below is implemented in the current Line-GTK feature set. The
 **Desktop, recovery, and appearance**
 
 - [x] Desktop notifications with sender/group titles, sticker images, mention titles, sound, volume, and per-chat mute
+- [x] [Reply from notifications](docs/notification-replies.md) in a separate composer, preserving the active chat and its draft
 - [x] System tray with recent chats, unread badge, mute timers, close-to-tray, and autostart
 - [x] Resume after sleep and network recovery, reconnect retries, stalled-receiver detection, and cached chats at startup
 - [x] Discord Rich Presence, themes, font and UI scaling, animations, and Vietnamese (default), Thai, English, and Japanese UI
@@ -82,7 +83,7 @@ These are native LINE features this client does not provide. The experimental vo
 - [ ] Group Notes/posts and group album management
 - [ ] Forwarding and sharing messages, multi-select actions, and pinning individual messages
 - [ ] Full-text search across all chats (search is per conversation and limited to saved history)
-- [ ] Per-chat backgrounds/themes, message translation, notification quick reply, and message effects
+- [ ] Per-chat backgrounds/themes, message translation, typing replies directly inside notifications, and message effects
 - [ ] Keep, Keep Memo, and saving messages to Keep
 - [ ] Official-account rich menus, buttons, and quick replies
 

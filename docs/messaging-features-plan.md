@@ -1,6 +1,6 @@
 # Kế hoạch tính năng nhắn tin
 
-Trạng thái: đã triển khai và kiểm thử cục bộ nền tảng M0, 2026-11-04; M1–M5 chưa triển khai. Xem [hợp đồng operation, ma trận và bằng chứng M0](messaging-m0.md). Khảo sát media/announcement/notification đã ghi rõ phần được chứng minh bằng nguồn/fixture và phần còn cần tài khoản LINE hoặc desktop thật.
+Trạng thái: nền tảng M0 đã triển khai và kiểm thử cục bộ, 2026-11-04; M5a đã triển khai và kiểm thử bằng fixture, 2026-11-09. M1–M4 chưa triển khai; M5b chưa bật vì backend Linux hiện tại không nhận được text inline. Xem [bằng chứng M0](messaging-m0.md) và [hành vi, kiểm thử và giới hạn M5](notification-replies.md). Kiểm tra LINE thật và ma trận desktop native/Flatpak vẫn còn riêng.
 
 Mục tiêu: bổ sung chọn nhiều tin, chuyển tiếp/chia sẻ, ghim từng tin, tìm kiếm xuyên cuộc trò chuyện và trả lời từ thông báo. Chia thành các đợt có thể phát hành riêng. Các giới hạn đề xuất dưới đây là giới hạn của ứng dụng, cần điều chỉnh sau kiểm thử; không phải giới hạn được xác nhận của LINE.
 
@@ -127,12 +127,12 @@ Nghiệm thu: account isolation, Unicode Việt/Nhật/Thái, filename, ID lớn
 
 ### M5a: nút Trả lời và hộp soạn gọn
 
-- [ ] Thêm action Trả lời mang token tra cứu context gồm tài khoản/phiên/chat/tin nguồn. Cập nhật notification hoặc fallback GIO không được vô tình đổi context của action cũ.
-- [ ] Mở hộp soạn gọn có tên chat và preview tin, không đổi chat đang mở hoặc ghi đè bản nháp composer chính. Chỉ gửi sau thao tác rõ ràng của người dùng.
-- [ ] Dùng gửi văn bản chung M0; có trích dẫn tin nguồn khi hợp lệ, xác minh nguồn vẫn thuộc chat. Nếu tin nguồn đã thu hồi, cho biết tình trạng và để người dùng chọn gửi tin thường, không âm thầm đổi ý nghĩa.
-- [ ] Kiểm tra phiên, quyền gửi và chặn trước khi gửi. Thông báo cũ từ tài khoản khác/phiên cũ không thể phát tin; chuyển sang đăng nhập hoặc mở app với giải thích phù hợp.
-- [ ] Mất mạng giữ nội dung trong hộp soạn; chỉ xếp hàng khi người dùng chọn và outbox giữ được chính xác account/chat/source. Không tự xếp hàng khi chưa chứng minh điều kiện đó.
-- [ ] Kết quả thành công/lỗi/chưa rõ hiện ngay trong hộp soạn. Không coi bấm action hoặc nhập chữ là đã đọc; tôn trọng read pause và policy hiện có.
+- [x] Thêm action Trả lời mang token tra cứu context gồm tài khoản/phiên/chat/tin nguồn. Cập nhật notification hoặc fallback GIO không được vô tình đổi context của action cũ.
+- [x] Mở hộp soạn gọn có tên chat và preview tin, không đổi chat đang mở hoặc ghi đè bản nháp composer chính. Chỉ gửi sau thao tác rõ ràng của người dùng.
+- [x] Dùng gửi văn bản chung M0; có trích dẫn tin nguồn khi hợp lệ, xác minh nguồn vẫn thuộc chat. Nếu tin nguồn đã thu hồi, cho biết tình trạng và để người dùng chọn gửi tin thường, không âm thầm đổi ý nghĩa.
+- [x] Kiểm tra phiên, quyền gửi và chặn trước khi gửi. Thông báo cũ từ tài khoản khác/phiên cũ không thể phát tin; chuyển sang đăng nhập hoặc mở app với giải thích phù hợp.
+- [x] Mất mạng giữ nội dung trong hộp soạn; không tự xếp hàng. Sau khi process thay đổi, giữ text để sao chép nhưng vô hiệu hóa context cũ; logout đóng hộp soạn.
+- [x] Kết quả thành công/lỗi/chưa rõ hiện ngay trong hộp soạn. Không coi bấm action hoặc nhập chữ là đã đọc; tôn trọng read pause và policy hiện có.
 
 ### M5b: nhập trực tiếp trong notification
 

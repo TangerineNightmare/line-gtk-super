@@ -8,6 +8,32 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const NOTIFICATION_WINDOW: Duration = Duration::from_secs(12);
+const BATCH_DELAY: Duration = Duration::from_millis(400);
+const DETAILS_DELAY: Duration = Duration::from_millis(1200);
+const MAX_PREVIEWS: usize = 3;
+
+fn previous_in_window<'a>(
+    pending: &'a HashMap<String, PendingNotif>,
+    account: &Option<String>,
+    generation: u64,
+    peer_mid: &str,
+    now: Instant,
+) -> Option<&'a PendingNotif> {
+    pending
+        .values()
+        .filter(|meta| {
+            &meta.account == account
+                && meta.generation == generation
+                && meta.chat_mid == peer_mid
+                && now.saturating_duration_since(meta.created) < NOTIFICATION_WINDOW
+        })
+        .max_by_key(|meta| meta.created)
+        .filter(|meta| {
+            meta.ticket
+                .as_ref()
+                .is_none_or(|ticket| !ticket.is_closed())
+        })
+}
 
 pub(super) fn notify_incoming(state: &AppState, msg: &MessageInfo, peer_mid: &str) {
     let viewing =
@@ -36,25 +62,47 @@ pub(super) fn notify_incoming(state: &AppState, msg: &MessageInfo, peer_mid: &st
     // The pending entry also lets delayed sender/image updates target that bubble.
     let account = state.self_mid.borrow().clone();
     let pending = state.notif_pending.borrow();
-    let previous = pending
-        .values()
-        .filter(|meta| {
-            meta.account == account
-                && meta.chat_mid == peer_mid
-                && meta.notified
-                && meta.created.elapsed() < NOTIFICATION_WINDOW
-                && meta
-                    .ticket
-                    .as_ref()
-                    .is_none_or(|ticket| !ticket.is_closed())
-        })
-        .max_by_key(|meta| meta.created);
-    let coalesced = previous.is_some();
+    let now = Instant::now();
+    let previous = previous_in_window(
+        &pending,
+        &account,
+        state.sidecar.session_generation(),
+        peer_mid,
+        now,
+    );
+    // A burst that has not been shown yet still needs its first sound.
+    let coalesced = previous.is_some_and(|meta| meta.notified || meta.coalesced);
+    let body = preview_body_ui(msg);
+    let mut recent_bodies = previous
+        .map(|meta| meta.recent_bodies.clone())
+        .unwrap_or_default();
+    recent_bodies.push((
+        message_senders::is_group_chat(state, peer_mid).then(|| msg.from.clone()),
+        body,
+    ));
+    if recent_bodies.len() > MAX_PREVIEWS {
+        recent_bodies.drain(..recent_bodies.len() - MAX_PREVIEWS);
+    }
+    let delay = if (sticker && image_path.is_none())
+        || (message_senders::is_group_chat(state, peer_mid)
+            && message_senders::known_name(state, &msg.from).is_none())
+    {
+        DETAILS_DELAY
+    } else {
+        BATCH_DELAY
+    };
+    // Inherit the first pending delivery deadline so a continuous burst cannot
+    // postpone the conversation's notification indefinitely.
+    let deliver_at = previous
+        .filter(|meta| !meta.notified)
+        .map(|meta| meta.deliver_at)
+        .unwrap_or(now + delay);
     let replace = previous
         .and_then(|meta| meta.ticket.as_ref())
         .filter(|ticket| !ticket.is_closed())
         .cloned();
     drop(pending);
+    let reply_token = super::notification_reply::register(state, msg, peer_mid, &name);
     let meta = PendingNotif {
         mentioned: super::mentions::mentions_account(msg, state.self_mid.borrow().as_deref()),
         chat_mid: peer_mid.to_string(),
@@ -62,14 +110,17 @@ pub(super) fn notify_incoming(state: &AppState, msg: &MessageInfo, peer_mid: &st
         displayed_sender: None,
         image_path,
         title: name,
-        body: preview_body_ui(msg),
+        recent_bodies,
         avatar_path,
         sticker,
         ticket: replace,
         coalesced,
         notified: false,
-        created: Instant::now(),
+        created: now,
+        deliver_at,
         account: state.self_mid.borrow().clone(),
+        generation: state.sidecar.session_generation(),
+        reply_token,
     };
     if !msg.id.is_empty() {
         let mut pending = state.notif_pending.borrow_mut();
@@ -84,22 +135,22 @@ pub(super) fn notify_incoming(state: &AppState, msg: &MessageInfo, peer_mid: &st
         }
         pending.insert(msg.id.clone(), meta.clone());
     }
-    if wait_for_details(state, &meta) && !msg.id.is_empty() {
-        // 名前とスタンプ画像を短時間待ち、同じ通知の更新で補完する。
+    if !msg.id.is_empty() {
+        // Batch bursts before asking the desktop to display a notification.
         let s = state.clone();
         let id = msg.id.clone();
-        glib::timeout_add_local_once(Duration::from_millis(1200), move || {
-            if let Some(meta) = pending_for_delivery(&s, &id)
-                && !meta.notified
-            {
-                deliver(&s, &id, meta);
-            }
-        });
+        glib::timeout_add_local_once(
+            deliver_at.saturating_duration_since(Instant::now()),
+            move || {
+                if let Some(meta) = pending_for_delivery(&s, &id)
+                    && !meta.notified
+                {
+                    deliver(&s, &id, meta);
+                }
+            },
+        );
     } else {
         deliver(state, &msg.id, meta);
-    }
-    if !coalesced && state.config.borrow().notification_sound {
-        play_notification_sound(state);
     }
 }
 
@@ -127,6 +178,7 @@ fn pending_for_delivery(state: &AppState, id: &str) -> Option<PendingNotif> {
         || viewing
         || !*state.session_ready.borrow()
         || meta.account != *state.self_mid.borrow()
+        || meta.generation != state.sidecar.session_generation()
         || meta.created.elapsed() >= Duration::from_secs(30)
         || (meta.notified
             && meta
@@ -144,17 +196,10 @@ fn is_superseded(pending: &HashMap<String, PendingNotif>, id: &str, meta: &Pendi
     pending.iter().any(|(other_id, other)| {
         other_id != id
             && other.account == meta.account
+            && other.generation == meta.generation
             && other.chat_mid == meta.chat_mid
             && other.created > meta.created
     })
-}
-
-fn wait_for_details(state: &AppState, meta: &PendingNotif) -> bool {
-    meta.created.elapsed() < Duration::from_millis(1200)
-        && ((meta.sticker && meta.image_path.is_none())
-            || meta.sender_mid.as_deref().is_some_and(|mid| {
-                !mid.is_empty() && message_senders::known_name(state, mid).is_none()
-            }))
 }
 
 pub(super) fn refresh_notification_media(state: &AppState, message_id: &str, image_path: &str) {
@@ -176,8 +221,12 @@ pub(super) fn refresh_notification_sender(state: &AppState, mid: &str) {
         .borrow()
         .iter()
         .filter(|(_, meta)| {
-            meta.sender_mid.as_deref() == Some(mid)
-                && meta.displayed_sender.as_deref() != Some(name.as_str())
+            (meta.sender_mid.as_deref() == Some(mid)
+                && meta.displayed_sender.as_deref() != Some(name.as_str()))
+                || meta
+                    .recent_bodies
+                    .iter()
+                    .any(|(sender, _)| sender.as_deref() == Some(mid))
         })
         .map(|(id, _)| id.clone())
         .collect();
@@ -190,13 +239,16 @@ fn refresh_pending(state: &AppState, message_id: &str) {
     let Some(meta) = pending_for_delivery(state, message_id) else {
         return;
     };
-    if !meta.notified && wait_for_details(state, &meta) {
+    if !meta.notified && Instant::now() < meta.deliver_at {
         return;
     }
     deliver(state, message_id, meta);
 }
 
 fn deliver(state: &AppState, message_id: &str, meta: PendingNotif) {
+    if !meta.notified && !meta.coalesced && state.config.borrow().notification_sound {
+        play_notification_sound(state);
+    }
     let preview = if meta.sticker {
         meta.image_path.as_deref().and_then(|path| {
             crate::desktop_notify::sticker_preview(
@@ -217,7 +269,9 @@ fn deliver(state: &AppState, message_id: &str, meta: PendingNotif) {
         .sender_mid
         .as_deref()
         .map(|mid| message_senders::name(state, mid));
-    let title = if let Some(sender) = sender_name.as_deref() {
+    let title = if meta.recent_bodies.len() > 1 && !meta.mentioned {
+        meta.title.clone()
+    } else if let Some(sender) = sender_name.as_deref() {
         crate::i18n::tf(
             if meta.mentioned {
                 "notification_group_mention"
@@ -229,19 +283,53 @@ fn deliver(state: &AppState, message_id: &str, meta: PendingNotif) {
     } else {
         meta.title.clone()
     };
+    let grouped_body = meta
+        .recent_bodies
+        .iter()
+        .map(|(sender, body)| {
+            if meta.recent_bodies.len() > 1
+                && let Some(mid) = sender
+            {
+                format!("{}: {body}", message_senders::name(state, mid))
+            } else {
+                body.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    // Notification lifetime is independent of the preview/sound grouping window.
+    // A popup can still be visible after twelve seconds (for example on hover).
+    let active_key = format!(
+        "{}:{}:{}",
+        meta.account.as_deref().unwrap_or_default(),
+        meta.generation,
+        meta.chat_mid
+    );
+    state
+        .notif_active
+        .borrow_mut()
+        .retain(|_, ticket| !ticket.is_closed());
+    let active = state.notif_active.borrow().get(&active_key).cloned();
     let ticket = send_desktop_notification(
         state,
         ChatNotification {
             title: &title,
-            body: &meta.body,
+            body: &grouped_body,
             avatar_path: meta.avatar_path.as_deref(),
             image_path,
-            chat_mid: &meta.chat_mid,
+            reply_token: meta.reply_token.as_deref(),
+            allow_reply: super::notification_reply::can_reply(state, meta.reply_token.as_deref()),
             suppress_sound: meta.notified || meta.coalesced,
-            sticker: meta.sticker,
-            replace: meta.ticket.as_ref().filter(|ticket| !ticket.is_closed()),
+            sticker: meta.sticker && meta.recent_bodies.len() == 1,
+            replace: active.as_ref(),
         },
     );
+    if let Some(ticket) = &ticket {
+        state
+            .notif_active
+            .borrow_mut()
+            .insert(active_key, ticket.clone());
+    }
     if let Some(pending) = state.notif_pending.borrow_mut().get_mut(message_id) {
         pending.notified = true;
         pending.displayed_sender = sender_name;
@@ -261,9 +349,18 @@ fn send_desktop_notification(
             notification.set_body(Some(request.body));
             notification.set_priority(gio::NotificationPriority::Normal);
             notification.set_default_action_and_target_value(
-                "app.open-chat",
-                Some(&request.chat_mid.to_variant()),
+                "app.open-notification",
+                Some(&request.reply_token.unwrap_or_default().to_variant()),
             );
+            if request.allow_reply
+                && let Some(token) = request.reply_token
+            {
+                notification.add_button_with_target_value(
+                    &crate::i18n::t("notification_reply"),
+                    "app.reply-notification",
+                    Some(&token.to_variant()),
+                );
+            }
             // 本文画像に対応しない経路でも、スタンプ自体をアイコンにする。
             let icon = if request.sticker {
                 request.image_path.or(request.avatar_path)
@@ -275,12 +372,7 @@ fn send_desktop_notification(
             } else {
                 notification.set_icon(&gio::ThemedIcon::new("line-gtk"));
             }
-            let account = state.self_mid.borrow();
-            let id = format!(
-                "line-gtk-{}-{}",
-                account.as_deref().unwrap_or("unknown"),
-                request.chat_mid
-            );
+            let id = super::notification_reply::fallback_id(state, request.reply_token);
             state.app.send_notification(Some(&id), &notification);
             None
         }
@@ -413,15 +505,42 @@ mod tests {
             displayed_sender: None,
             image_path: None,
             title: String::new(),
-            body: String::new(),
+            recent_bodies: Vec::new(),
             avatar_path: None,
             sticker: false,
             ticket: None,
             coalesced: false,
             notified: true,
             created,
+            deliver_at: created + BATCH_DELAY,
             account: Some(account.into()),
+            generation: 1,
+            reply_token: None,
         }
+    }
+
+    #[test]
+    fn bursts_include_undelivered_messages_and_isolate_chat_account_and_session() {
+        let now = Instant::now();
+        let account = Some("u-account".to_string());
+        let mut by_id = HashMap::new();
+        let mut waiting = pending("c-group", "u-account", now);
+        waiting.notified = false;
+        by_id.insert("waiting".into(), waiting);
+        by_id.insert("other-chat".into(), pending("c-other", "u-account", now));
+        by_id.insert("other-account".into(), pending("c-group", "u-other", now));
+        let mut old_session = pending("c-group", "u-account", now + BATCH_DELAY);
+        old_session.generation = 2;
+        by_id.insert("other-session".into(), old_session);
+        let previous =
+            previous_in_window(&by_id, &account, 1, "c-group", now + BATCH_DELAY).unwrap();
+        assert!(!previous.notified);
+        assert_eq!(previous.created, now);
+        assert_eq!(previous.deliver_at, now + BATCH_DELAY);
+        assert!(
+            previous_in_window(&by_id, &account, 1, "c-group", now + NOTIFICATION_WINDOW).is_none()
+        );
+        assert!(previous_in_window(&by_id, &account, 1, "c-absent", now).is_none());
     }
 
     #[test]

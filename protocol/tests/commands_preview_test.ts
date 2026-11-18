@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import type { Client } from "@evex/linejs";
 import { InternalError } from "@evex/linejs/base";
 import { Buffer } from "node:buffer";
@@ -947,4 +947,230 @@ Deno.test("confirmed sends retain the server ID and do not fail when cache updat
     service.messageOperationStatus("text-confirmed").state,
     "succeeded",
   );
+});
+
+const notificationSource = {
+  id: "9007199254740993123",
+  from: "u-sender",
+  to: "c-notification",
+  text: "Original",
+  contentType: "NONE",
+};
+const notificationContext = {
+  accountMid: "u-self",
+  sourceMessageId: notificationSource.id,
+  quote: true,
+};
+
+Deno.test("notification replies use the fixed destination and exact source ID without reading", async () => {
+  const f = commandFixture("メモリ");
+  f.runtime.msgCache.set("c-notification", {
+    at: 1,
+    messages: [notificationSource],
+  });
+  const submitted: Record<string, unknown>[] = [];
+  stubSend(f.runtime.getClient()!, (args) => {
+    submitted.push(args);
+    return Promise.resolve({ id: "9007199254740993124" });
+  });
+  const service = createCommandService(f.runtime);
+  for (const id of [1, 2]) {
+    await service.sendMessage(
+      id,
+      "c-notification",
+      "Reply",
+      notificationSource.id,
+      undefined,
+      "notification-1",
+      notificationContext,
+    );
+  }
+  assertEquals(submitted.length, 1);
+  assertEquals(submitted[0].to, "c-notification");
+  assertEquals(String(submitted[0].relatedMessageId), notificationSource.id);
+  assertEquals(f.marks(), 0);
+  assertEquals(f.receiptsRefreshed(), 0);
+  assertEquals(f.networkCalls(), 0);
+});
+
+Deno.test("notification replies reject another account, absent or wrong-chat sources", async () => {
+  for (
+    const scenario of ["account", "absent", "wrong-chat", "unsent", "decrypt"]
+  ) {
+    const f = commandFixture("メモリ");
+    let submitted = 0;
+    const errors: string[] = [];
+    f.runtime.fail = (_id, error) => errors.push(error);
+    if (scenario !== "absent") {
+      f.runtime.msgCache.set("c-notification", {
+        at: 1,
+        messages: [{
+          ...notificationSource,
+          ...(scenario === "wrong-chat" ? { to: "c-other" } : {}),
+          ...(scenario === "unsent" ? { contentType: "UNSENT" } : {}),
+          ...(scenario === "decrypt" ? { decryptionFailed: true } : {}),
+        }],
+      });
+    }
+    stubSend(f.runtime.getClient()!, () => {
+      submitted++;
+      return Promise.resolve({ id: "99" });
+    });
+    await createCommandService(f.runtime).sendMessage(
+      1,
+      "c-notification",
+      "Reply",
+      notificationSource.id,
+      undefined,
+      "notification-check",
+      {
+        ...notificationContext,
+        ...(scenario === "account" ? { accountMid: "u-other" } : {}),
+      },
+    );
+    assertEquals(submitted, 0, scenario);
+    assertEquals(errors, [
+      scenario === "account"
+        ? "session_changed"
+        : ["unsent", "decrypt"].includes(scenario)
+        ? "invalid_reply_target"
+        : "notification_reply_source_unavailable",
+    ]);
+    assertEquals(f.marks(), 0);
+  }
+});
+
+Deno.test("notification source loading rechecks the session and live tombstones before submit", async () => {
+  for (const scenario of ["disk", "session", "unsent", "block"]) {
+    const f = commandFixture("メモリ");
+    const client = f.runtime.getClient()!;
+    let submitted = 0;
+    const errors: string[] = [];
+    let blocked = false;
+    f.runtime.fail = (_id, error) => errors.push(error);
+    f.runtime.loadDiskMessages = () => {
+      if (scenario === "session") f.runtime.getClient = () => null;
+      return Promise.resolve([notificationSource]);
+    };
+    f.runtime.assertCanSend = () => {
+      if (blocked) throw new Error("contact_blocked_send");
+    };
+    f.setSequenceHook(() => {
+      if (scenario === "unsent") {
+        f.runtime.msgCache.set("c-notification", {
+          at: 1,
+          messages: [{ ...notificationSource, contentType: "UNSENT" }],
+        });
+      }
+      if (scenario === "block") blocked = true;
+      return Promise.resolve(1);
+    });
+    stubSend(client, () => {
+      submitted++;
+      return Promise.resolve({ id: "99" });
+    });
+    await createCommandService(f.runtime).sendMessage(
+      1,
+      "c-notification",
+      "Reply",
+      notificationSource.id,
+      undefined,
+      "notification-disk",
+      notificationContext,
+    );
+    assertEquals(submitted, scenario === "disk" ? 1 : 0);
+    assertEquals(
+      errors,
+      scenario === "disk" ? [] : [
+        scenario === "session"
+          ? "session_changed"
+          : scenario === "block"
+          ? "contact_blocked_send"
+          : "notification_reply_source_unavailable",
+      ],
+    );
+    assertEquals(f.marks(), 0);
+  }
+});
+
+Deno.test("unavailable originals require an explicit unquoted notification reply", async () => {
+  const f = commandFixture("メモリ");
+  const submitted: Record<string, unknown>[] = [];
+  const errors: string[] = [];
+  f.runtime.fail = (_id, error) => errors.push(error);
+  stubSend(f.runtime.getClient()!, (args) => {
+    submitted.push(args);
+    return Promise.resolve({ id: "99" });
+  });
+  const service = createCommandService(f.runtime);
+  await service.sendMessage(
+    1,
+    "c-notification",
+    "Reply",
+    undefined,
+    undefined,
+    "notification-quote",
+    notificationContext,
+  );
+  assertEquals(errors, ["invalid_notification_reply"]);
+  await service.sendMessage(
+    2,
+    "c-notification",
+    "Reply",
+    undefined,
+    undefined,
+    "notification-unquoted",
+    { ...notificationContext, quote: false },
+  );
+  assertEquals(submitted.length, 1);
+  assertEquals(submitted[0].relatedMessageId, undefined);
+  assertEquals(submitted[0].to, "c-notification");
+  await assertRejects(
+    () =>
+      service.sendMessage(
+        3,
+        "c-notification",
+        "Reply",
+        notificationSource.id,
+        undefined,
+        "notification-unquoted",
+        notificationContext,
+      ),
+    Error,
+    "operation_payload_changed",
+  );
+});
+
+Deno.test("an uncertain notification reply stays deduplicated and never marks read", async () => {
+  const f = commandFixture("メモリ");
+  f.runtime.msgCache.set("c-notification", {
+    at: 1,
+    messages: [notificationSource],
+  });
+  let submitted = 0;
+  const outcomes: unknown[] = [];
+  f.runtime.fail = (_id, _error, result) => outcomes.push(result);
+  stubSend(f.runtime.getClient()!, () => {
+    submitted++;
+    return Promise.reject(new Error("lost after submit"));
+  });
+  const service = createCommandService(f.runtime);
+  for (const id of [1, 2]) {
+    await service.sendMessage(
+      id,
+      "c-notification",
+      "Reply",
+      notificationSource.id,
+      undefined,
+      "notification-unknown",
+      notificationContext,
+    );
+  }
+  assertEquals(submitted, 1);
+  assertEquals(outcomes.length, 2);
+  assertEquals(
+    service.messageOperationStatus("notification-unknown").state,
+    "unknown",
+  );
+  assertEquals(f.marks(), 0);
 });

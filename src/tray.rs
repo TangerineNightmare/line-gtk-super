@@ -15,6 +15,15 @@ pub enum TrayAction {
     OpenChat {
         mid: String,
     },
+    OpenNotification {
+        token: String,
+    },
+    ReplyNotification {
+        token: String,
+    },
+    NotificationClosed {
+        token: String,
+    },
     /// `secs == 0` clears the timed mute. Otherwise mute notifications for that many seconds.
     MuteFor {
         secs: u64,

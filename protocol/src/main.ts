@@ -2778,6 +2778,7 @@ async function handle(req: Json) {
           params.replyToMessageId,
           params.mentions,
           params.operationId,
+          params.notificationReply,
         );
         break;
       case "send_audio":

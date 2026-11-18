@@ -192,6 +192,8 @@ pub(super) struct AppState {
     pub history: Rc<RefCell<super::history::HistoryWindow>>,
     pub resume_sync: Rc<RefCell<super::resume_sync::ResumeSync>>,
     pub notif_pending: Rc<RefCell<HashMap<String, PendingNotif>>>,
+    pub notif_active: Rc<RefCell<HashMap<String, crate::desktop_notify::NotificationTicket>>>,
+    pub notification_replies: Rc<RefCell<super::notification_reply::ReplyState>>,
     pub media_ready_paths: Rc<RefCell<HashMap<String, String>>>,
     pub emoji_views: Rc<RefCell<Vec<super::emojis::EmojiText>>>,
     pub emoji_textures: Rc<RefCell<HashMap<String, gtk::gdk::Texture>>>,
@@ -206,18 +208,24 @@ pub(super) struct PendingNotif {
     pub displayed_sender: Option<String>,
     pub image_path: Option<String>,
     pub title: String,
-    pub body: String,
+    pub recent_bodies: Vec<(Option<String>, String)>,
     pub avatar_path: Option<String>,
     pub sticker: bool,
     pub ticket: Option<crate::desktop_notify::NotificationTicket>,
     pub coalesced: bool,
     pub notified: bool,
     pub created: std::time::Instant,
+    pub deliver_at: std::time::Instant,
     pub account: Option<String>,
+    pub generation: u64,
+    pub reply_token: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub(super) enum Pending {
+    NotificationReply {
+        ui: std::rc::Weak<super::notification_reply::ReplyUi>,
+    },
     MarkRead {
         account: String,
         chat_mid: String,

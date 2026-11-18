@@ -30,6 +30,7 @@ pub(super) fn handle_event(state: &AppState, ev: ProtocolEvent) {
             message_id,
         } => {
             unsend::apply(state, &account_mid, &chat_mid, &message_id);
+            notification_reply::unsent(state, &account_mid, &chat_mid, &message_id);
             if state.self_mid.borrow().as_deref() == Some(account_mid.as_str()) {
                 shared_media::unsent(state, &chat_mid, &message_id);
                 message_search::unsent(state, &chat_mid);
@@ -743,6 +744,17 @@ pub(super) fn handle_event(state: &AppState, ev: ProtocolEvent) {
             error,
         } => {
             let pending = state.pending.borrow_mut().remove(&id);
+            if let Some(Pending::NotificationReply { ui }) = pending.as_ref() {
+                if let Some(ui) = ui.upgrade() {
+                    notification_reply::response(state, &ui, ok, &result, error.as_deref());
+                }
+                if error.as_deref() == Some("protocol request timed out")
+                    && let Some(pending) = pending
+                {
+                    state.pending.borrow_mut().insert(id, pending);
+                }
+                return;
+            }
             if let Some(Pending::Send {
                 account,
                 generation,
@@ -1136,6 +1148,7 @@ pub(super) fn handle_event(state: &AppState, ev: ProtocolEvent) {
                 }
                 Some(
                     Pending::MentionMembers { .. }
+                    | Pending::NotificationReply { .. }
                     | Pending::StickerLibrary(_)
                     | Pending::ConversationSettings { .. }
                     | Pending::Album { .. }
@@ -1160,6 +1173,7 @@ pub(super) fn handle_event(state: &AppState, ev: ProtocolEvent) {
         }
         ProtocolEvent::Error(e) => toast(state, &e),
         ProtocolEvent::Exited(code) => {
+            notification_reply::invalidate(state);
             for pending in state.pending.borrow().values() {
                 if let Pending::Send { placeholder_id, .. } = pending {
                     read_details::send_unknown(state, placeholder_id);
@@ -1225,6 +1239,7 @@ pub(super) fn schedule_sidecar_recovery(state: &AppState) {
 }
 
 pub(super) fn recover_sidecar(state: &AppState) {
+    notification_reply::invalidate(state);
     *state.recovery_scheduled.borrow_mut() = false;
     match state.sidecar.recover() {
         Ok(()) => {
@@ -1240,6 +1255,11 @@ pub(super) fn recover_sidecar(state: &AppState) {
 }
 
 pub(super) fn on_logged_in(state: &AppState, result: &serde_json::Value) {
+    if state.self_mid.borrow().as_deref() != result.get("mid").and_then(|mid| mid.as_str()) {
+        notification_reply::reset(state);
+    } else {
+        notification_reply::invalidate(state);
+    }
     read_details::close();
     state.reader_avatars.borrow_mut().clear();
     let saved_view = cache_boot::active(state);
@@ -1249,6 +1269,7 @@ pub(super) fn on_logged_in(state: &AppState, result: &serde_json::Value) {
     user_profile::update_header(state, None);
     *state.unread_sync.borrow_mut() = unread_sync::UnreadSync::default();
     state.notif_pending.borrow_mut().clear();
+    state.notif_active.borrow_mut().clear();
     mentions::reset_lookup(state);
     resume_sync::cancel(state);
     state.sender_names.borrow_mut().clear();
@@ -1344,6 +1365,7 @@ pub(super) fn show_shell_restoring(state: &AppState) {
 }
 
 pub(super) fn show_login(state: &AppState, hint: &str) {
+    notification_reply::reset(state);
     read_details::close();
     state.reader_avatars.borrow_mut().clear();
     read_position::reset(state);
@@ -1354,6 +1376,7 @@ pub(super) fn show_login(state: &AppState, hint: &str) {
     chat_snapshots::clear();
     *state.unread_sync.borrow_mut() = unread_sync::UnreadSync::default();
     state.notif_pending.borrow_mut().clear();
+    state.notif_active.borrow_mut().clear();
     mentions::reset_lookup(state);
     resume_sync::cancel(state);
     state.sender_names.borrow_mut().clear();

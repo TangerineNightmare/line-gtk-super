@@ -33,6 +33,7 @@ mod message_copy;
 mod message_search;
 mod message_senders;
 mod messages;
+mod notification_reply;
 mod notifications;
 mod pinned_chats;
 mod poll_create;
@@ -349,6 +350,8 @@ fn build_ui(
         history: Rc::new(RefCell::new(history::HistoryWindow::default())),
         resume_sync: Rc::new(RefCell::new(resume_sync::ResumeSync::default())),
         notif_pending: Rc::new(RefCell::new(HashMap::new())),
+        notif_active: Rc::new(RefCell::new(HashMap::new())),
+        notification_replies: Rc::new(RefCell::new(notification_reply::ReplyState::default())),
         media_ready_paths: Rc::new(RefCell::new(HashMap::new())),
         emoji_views: Rc::new(RefCell::new(Vec::new())),
         emoji_textures: Rc::new(RefCell::new(HashMap::new())),
@@ -726,6 +729,15 @@ fn pump_tray_actions(state: AppState, rx: async_channel::Receiver<crate::tray::T
                 crate::tray::TrayAction::OpenChat { mid } => {
                     present_and_open_chat(&state, &mid);
                 }
+                crate::tray::TrayAction::OpenNotification { token } => {
+                    notification_reply::open_chat(&state, &token);
+                }
+                crate::tray::TrayAction::ReplyNotification { token } => {
+                    notification_reply::open(&state, &token);
+                }
+                crate::tray::TrayAction::NotificationClosed { token } => {
+                    notification_reply::retire(&state, &token);
+                }
                 crate::tray::TrayAction::MuteFor { secs } => {
                     set_global_notif_mute(&state, secs);
                 }
@@ -769,6 +781,7 @@ fn present_and_open_chat(state: &AppState, mid: &str) {
 }
 
 fn wire_notification_actions(state: &AppState) {
+    notification_reply::wire(state);
     let open = gio::SimpleAction::new("open-chat", Some(glib::VariantTy::STRING));
     let s = state.clone();
     open.connect_activate(move |_a, param| {
@@ -1583,6 +1596,7 @@ fn wire_actions(state: &AppState) {
                 let s2 = s.clone();
                 Rc::new(move || {
                     auto_login::manual_logout(&s2);
+                    notification_reply::reset(&s2);
                     composer_drafts::reset(&s2);
                     albums::close(&s2);
                     conversation_settings::close();
@@ -2031,6 +2045,7 @@ fn restart_qr_login(state: &AppState) {
 }
 
 fn restart_login(state: &AppState) {
+    notification_reply::reset(state);
     auto_login::manual_restart(state);
     contact_blocks::reset(state);
     user_profile::close();

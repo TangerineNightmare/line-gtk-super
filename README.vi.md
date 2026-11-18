@@ -56,6 +56,7 @@ Mọi mục được đánh dấu [x] bên dưới đã có trong bản Line-GTK
 **Desktop, khôi phục và giao diện**
 
 - [x] Thông báo desktop với tên người gửi/nhóm, ảnh sticker, tiêu đề nhắc tên, âm thanh, âm lượng và tắt tiếng theo cuộc trò chuyện
+- [x] [Trả lời từ thông báo](docs/notification-replies.md) bằng hộp soạn riêng, giữ nguyên cuộc trò chuyện và bản nháp đang mở
 - [x] Khay hệ thống với cuộc trò chuyện gần đây, huy hiệu chưa đọc, hẹn giờ tắt tiếng, thu nhỏ vào khay và tự chạy khi đăng nhập
 - [x] Khôi phục sau ngủ/mất mạng, thử lại kết nối, phát hiện luồng nhận bị treo và khôi phục cuộc trò chuyện đã lưu khi khởi động
 - [x] Discord Rich Presence, giao diện, tỷ lệ phông/chữ, hiệu ứng và tiếng Việt (mặc định), Thái, Anh, Nhật
@@ -82,7 +83,7 @@ Mọi mục được đánh dấu [x] bên dưới đã có trong bản Line-GTK
 - [ ] Note/bài đăng nhóm và quản lý album nhóm
 - [ ] Chuyển tiếp/chia sẻ tin nhắn, thao tác nhiều tin và ghim từng tin nhắn
 - [ ] Tìm toàn văn trên mọi cuộc trò chuyện (hiện chỉ tìm trong một cuộc trò chuyện và lịch sử đã lưu)
-- [ ] Nền/giao diện riêng cho cuộc trò chuyện, dịch tin nhắn, trả lời nhanh từ thông báo và hiệu ứng tin nhắn
+- [ ] Nền/giao diện riêng cho cuộc trò chuyện, dịch tin nhắn, nhập trả lời trực tiếp trong thông báo và hiệu ứng tin nhắn
 - [ ] Keep, Keep Memo và lưu tin nhắn vào Keep
 - [ ] Menu phong phú của tài khoản chính thức, nút và trả lời nhanh
 

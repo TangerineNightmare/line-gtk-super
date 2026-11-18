@@ -15,6 +15,10 @@ import { createLineFetch } from "./connection.ts";
 import { coerceI64 } from "./messages.ts";
 import { guardTextSession, sendText } from "./message_send.ts";
 import { createMessageOperations } from "./message_operations.ts";
+import {
+  checkNotificationSource,
+  notificationReply,
+} from "./notification_reply.ts";
 import { type ChatRow, contactChatRow } from "./chat_rows.ts";
 import {
   clampPageSize,
@@ -1022,6 +1026,7 @@ export function createCommandService(runtime: CommandRuntime) {
     replyToMessageId?: unknown,
     rawMentions?: unknown,
     rawOperationId?: unknown,
+    rawNotificationReply?: unknown,
   ) {
     const client = runtime.getClient();
     if (!client) {
@@ -1030,6 +1035,17 @@ export function createCommandService(runtime: CommandRuntime) {
     }
     if (!text.trim()) {
       fail(id, "empty_message");
+      return;
+    }
+
+    const notification = rawNotificationReply === undefined
+      ? undefined
+      : notificationReply(rawNotificationReply);
+    if (
+      notification &&
+      notification.accountMid !== String(client.base.profile?.mid)
+    ) {
+      fail(id, "session_changed");
       return;
     }
 
@@ -1046,12 +1062,17 @@ export function createCommandService(runtime: CommandRuntime) {
       fail(id, "invalid_reply_target");
       return;
     }
-    const original = msgCache.get(chatMid)?.messages.find((m) =>
+    if (
+      notification &&
+      relatedMessageId !==
+        (notification.quote ? notification.sourceMessageId : undefined)
+    ) {
+      fail(id, "invalid_notification_reply");
+      return;
+    }
+    let original = msgCache.get(chatMid)?.messages.find((m) =>
       m.id === relatedMessageId
     );
-    const replyTo = relatedMessageId
-      ? (original ? replySnapshot(original) : { messageId: relatedMessageId })
-      : null;
 
     if (!/^[ucr][a-zA-Z0-9_-]{1,128}$/.test(chatMid)) {
       fail(id, "invalid_chat");
@@ -1068,22 +1089,66 @@ export function createCommandService(runtime: CommandRuntime) {
       ? `text-${crypto.randomUUID()}`
       : String(rawOperationId);
     guardTextSession(client, () => runtime.getClient() === client);
-    const payload = { chatMid, text, contentMetadata, relatedMessageId };
+    const payload = {
+      chatMid,
+      text,
+      contentMetadata,
+      relatedMessageId,
+      notification,
+    };
     const result = await operations.run(
       operationId,
       chatMid,
       payload,
-      (check, sending) =>
-        sendText(client, payload, () => {
+      async (check, sending) => {
+        if (notification?.quote) {
+          try {
+            check();
+            original ??= (await runtime.loadDiskMessages(chatMid))?.find((m) =>
+              String(m.id) === relatedMessageId
+            );
+            check();
+            checkNotificationSource(
+              original,
+              chatMid,
+              notification.sourceMessageId,
+            );
+          } catch (error) {
+            return {
+              state: "failed",
+              error:
+                error instanceof Error && error.message === "session_changed"
+                  ? "session_changed"
+                  : "notification_reply_source_unavailable",
+            };
+          }
+        }
+        return sendText(client, payload, () => {
           check();
           runtime.assertCanSend?.(chatMid);
+          if (notification) {
+            if (notification.accountMid !== String(client.base.profile?.mid)) {
+              throw new Error("session_changed");
+            }
+            if (notification.quote) {
+              checkNotificationSource(
+                msgCache.get(chatMid)?.messages.find((m) =>
+                  String(m.id) === relatedMessageId
+                ) ?? original,
+                chatMid,
+                notification.sourceMessageId,
+              );
+            }
+          }
           if (
-            relatedMessageId && msgCache.get(chatMid)?.messages.some((m) =>
+            relatedMessageId &&
+            msgCache.get(chatMid)?.messages.some((m) =>
               String(m.id) === relatedMessageId &&
               (m.contentType === "UNSENT" || m.decryptionFailed)
             )
           ) throw new Error("invalid_reply_target");
-        }, sending),
+        }, sending);
+      },
     );
     // A completed request from an old session must never update the new cache.
     if (runtime.getClient() !== client) {
@@ -1096,7 +1161,9 @@ export function createCommandService(runtime: CommandRuntime) {
     }
     const message = {
       ...sentMessagePayload(result.sent, chatMid, text),
-      replyTo,
+      replyTo: relatedMessageId
+        ? (original ? replySnapshot(original) : { messageId: relatedMessageId })
+        : null,
       mentions,
     };
     if (recordedFor !== client) {

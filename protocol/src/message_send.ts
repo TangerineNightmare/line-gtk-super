@@ -146,6 +146,7 @@ export async function sendTextSafely<T>(runtime: {
             "session_changed",
             "contact_blocked_send",
             "invalid_reply_target",
+            "notification_reply_source_unavailable",
           ].includes(reason)
           ? reason
           : "send_prepare_failed",

@@ -6,6 +6,8 @@ There are **46 app RPC methods**, **39 exported service classes** with **430 pub
 
 ## App RPC methods
 
+Notification replies (M5a, 2026-11-09) reuse `send_message`, with optional `notificationReply: {accountMid, sourceMessageId, quote}`. A quoted reply also supplies the same string ID in `replyToMessageId`. The sidecar checks account ownership, resolves the source from account-scoped memory/disk, verifies the conversation, and rechecks source/session/block state before submission. `quote: false` is an explicit user choice to send a new message without a quote. Existing callers are unchanged; there is no new notification publishing RPC. These sends use M0 operation IDs/outcomes and never mark the source read. See [notification replies](notification-replies.md).
+
 These methods are dispatched by [`protocol/src/main.ts`](../protocol/src/main.ts). They run over the local JSON-lines sidecar connection, not HTTP routes. Wired dispatch does not imply every operation has been verified against a live account.
 
 | Area | Methods |
