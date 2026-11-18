@@ -1,4 +1,5 @@
 import { BaseClient, InternalError } from "@evex/linejs/base";
+import { legyEncrypted } from "./connection.ts";
 import {
   type BaseStorage,
   MemoryStorage,
@@ -67,7 +68,11 @@ export function createKeyClient(
     },
     migrate: (target) => original.migrate(target),
   };
-  const base = new BaseClient({ ...init, storage });
+  const base = new BaseClient({
+    legy: { encrypted: legyEncrypted() },
+    ...init,
+    storage,
+  });
   const e2ee = base.e2ee;
   const decode = e2ee.decodeE2EEKeyV1.bind(e2ee);
   e2ee.decodeE2EEKeyV1 = async (raw, secret) => {

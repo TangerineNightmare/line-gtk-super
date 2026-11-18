@@ -1,7 +1,7 @@
 import type { loginWithPassword } from "@evex/linejs";
 import { loginWithPasswordKeys } from "./key_login.ts";
 import { createAuthStorage } from "./auth.ts";
-import { createLineFetch } from "./connection.ts";
+import { createLineFetch, legyEncrypted } from "./connection.ts";
 
 export type PasswordAuthenticator = typeof loginWithPassword;
 
@@ -41,7 +41,12 @@ export async function authenticateEmail(
       password,
       pincode: generateLoginPin(),
       onPincodeRequest: onPin,
-    }, { device: "DESKTOPWIN", storage, fetch: createLineFetch(90_000) });
+    }, {
+      device: "DESKTOPWIN",
+      storage,
+      fetch: createLineFetch(90_000),
+      legy: { encrypted: legyEncrypted() },
+    });
   } catch (error) {
     throw new Error(emailLoginError(error));
   }

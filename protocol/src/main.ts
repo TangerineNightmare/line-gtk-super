@@ -3236,7 +3236,7 @@ if (bootAuth) {
           storagePath,
           LINE_VERSION,
           undefined,
-          createLineFetch(25_000, globalThis.fetch, controller.signal),
+          createLineFetch(25_000, undefined, controller.signal),
         );
         controller.signal.throwIfAborted();
         // Save refreshed credentials before another request can fail.

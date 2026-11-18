@@ -33,16 +33,52 @@ export function failureKind(error: unknown): FailureKind {
   return "protocol";
 }
 
+/**
+ * OBS carries whole files before the response headers arrive, so the plain
+ * exchange deadline aborts large or slow uploads. Allow a much longer one for
+ * uploads only; every other LINE request keeps the short deadline.
+ */
+const OBS_UPLOAD_TIMEOUT_MS = 20 * 60_000;
+
+function isObsUpload(request: Request): boolean {
+  return request.method === "POST" &&
+    request.url.startsWith("https://obs.line-apps.com/");
+}
+
+export type LegyEncrypted = boolean | "auto";
+
+/**
+ * linejs `legy.encrypted` for every LINE client. Defaults to plain `/S4` and
+ * `/SYNC4` on legy.line-apps.com: since 2026-11-18 LINE's encrypted gateway
+ * (`gf.line.naver.jp/enc`) answers every request with an empty 404
+ * (evex-dev/linejs#280). Set LINE_GTK_LEGY_ENCRYPTED=auto once it recovers.
+ */
+export function legyEncrypted(
+  raw = Deno.env.get("LINE_GTK_LEGY_ENCRYPTED"),
+): LegyEncrypted {
+  const value = raw?.trim().toLowerCase() || "false";
+  if (value === "auto") return "auto";
+  if (value === "true") return true;
+  if (value === "false") return false;
+  console.error(
+    `[legy] Ignoring invalid LINE_GTK_LEGY_ENCRYPTED="${raw}"; using false`,
+  );
+  return false;
+}
+
 /** Bound each HTTP exchange, without retrying non-idempotent LINE operations. */
 export function createLineFetch(
   timeoutMs = 25_000,
   fetcher = globalThis.fetch,
   sessionSignal?: AbortSignal,
+  uploadTimeoutMs = OBS_UPLOAD_TIMEOUT_MS,
 ) {
   return async (request: Request): Promise<Response> => {
     const signal = AbortSignal.any([
       request.signal,
-      AbortSignal.timeout(timeoutMs),
+      AbortSignal.timeout(
+        isObsUpload(request) ? Math.max(timeoutMs, uploadTimeoutMs) : timeoutMs,
+      ),
       ...(sessionSignal ? [sessionSignal] : []),
     ]);
     const response = await fetcher(request, { signal });

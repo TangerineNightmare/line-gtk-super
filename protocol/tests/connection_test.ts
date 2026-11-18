@@ -1,7 +1,8 @@
-import { assertEquals, assertRejects } from "@std/assert";
+import { assert, assertEquals, assertRejects } from "@std/assert";
 import {
   createLineFetch,
   failureKind,
+  legyEncrypted,
   restoreWithRetry,
 } from "../src/connection.ts";
 
@@ -110,6 +111,42 @@ Deno.test("LINE requests have a deadline and retain caller cancellation", async 
   );
 });
 
+Deno.test("OBS uploads outlive the normal exchange deadline", async () => {
+  const abortedAt: number[] = [];
+  const fetcher = createLineFetch(
+    50,
+    (_input, init) =>
+      new Promise((_resolve, reject) => {
+        const signal = init!.signal!;
+        const started = Date.now();
+        signal.addEventListener(
+          "abort",
+          () => {
+            abortedAt.push(Date.now() - started);
+            reject(signal.reason);
+          },
+          { once: true },
+        );
+      }),
+    undefined,
+    400,
+  );
+  const upload = fetcher(
+    new Request("https://obs.line-apps.com/r/talk/m/reqseq", {
+      method: "POST",
+      body: new Blob([new Uint8Array(64)]),
+    }),
+  );
+  const plain = fetcher(new Request("https://legy.line-apps.com/api/v1/x"));
+  await assertRejects(() => plain, DOMException);
+  // The plain request gave up at ~50ms; the upload keeps going past that.
+  assertEquals(abortedAt.length, 1);
+  assert(abortedAt[0] < 200);
+  await assertRejects(() => upload, DOMException);
+  assertEquals(abortedAt.length, 2);
+  assert(abortedAt[1] >= 350);
+});
+
 Deno.test("replacing a login cancels a pending session request", async () => {
   const controller = new AbortController();
   const fetcher = createLineFetch(1000, (_input, init) => {
@@ -124,4 +161,13 @@ Deno.test("replacing a login cancels a pending session request", async () => {
   const pending = fetcher(new Request("https://example.invalid"));
   controller.abort();
   await assertRejects(() => pending, DOMException);
+});
+
+Deno.test("LEGY transport defaults to plain and parses explicit modes", () => {
+  assertEquals(legyEncrypted(undefined), false);
+  assertEquals(legyEncrypted(""), false);
+  assertEquals(legyEncrypted(" AUTO "), "auto");
+  assertEquals(legyEncrypted("true"), true);
+  assertEquals(legyEncrypted("false"), false);
+  assertEquals(legyEncrypted("yes"), false);
 });
