@@ -432,7 +432,7 @@ fn rebuild_list(state: &AppState, ui: &PickerUi, options: Vec<Member>, selected:
                     .build(),
             );
         } else {
-            avatar_frame.append(&avatar);
+            avatar_frame.append(&avatars::wrap(&avatar, &member.name, 40));
             state
                 .mentions
                 .borrow_mut()

@@ -1,3 +1,4 @@
+use super::avatars;
 use crate::i18n;
 use crate::protocol::ChatInfo;
 use crate::sidecar::Sidecar;
@@ -306,7 +307,7 @@ fn append_friend_row(ui: &FriendsUi, friend: &ChatInfo) {
         let tex = gtk::gdk::Texture::for_pixbuf(&pixbuf);
         avatar.set_paintable(Some(&tex));
     }
-    avatar_frame.append(&avatar);
+    avatar_frame.append(&avatars::wrap(&avatar, &friend.name, 40));
     ui.avatars.borrow_mut().insert(friend.mid.clone(), avatar);
 
     let text = gtk::Box::builder()

@@ -71,6 +71,7 @@ pub(super) fn apply(state: &AppState, mid: String, name: String) {
             label.set_tooltip_text(Some(&name));
         }
     }
+    user_profile::name_ready(&mid, &name);
     super::notifications::refresh_notification_sender(state, &mid);
     replies::refresh(state);
     chat_events::refresh(state);

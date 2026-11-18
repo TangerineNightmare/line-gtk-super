@@ -1,5 +1,6 @@
 mod albums;
 mod auto_login;
+mod avatars;
 mod cache_boot;
 mod cache_limit;
 mod call_history;
@@ -599,6 +600,7 @@ fn apply_self_profile(
         state.profile_label.set_text(display_name);
         state.profile_label.set_tooltip_text(Some(display_name));
         state.profile_avatar.set_tooltip_text(Some(display_name));
+        avatars::set_name(&state.profile_avatar, display_name);
     }
     if let Some(url) = picture_url.filter(|s| !s.is_empty()) {
         let full = if url.starts_with("http") {
@@ -1006,6 +1008,11 @@ fn set_avatar_tier(overlay: &gtk::Overlay, compact: bool) {
     {
         frame.set_width_request(px);
         frame.set_height_request(px);
+        if let Some(avatar) = frame.first_child().and_downcast::<gtk::Overlay>()
+            && let Some(fallback) = avatar.child().and_downcast::<libadwaita::Avatar>()
+        {
+            fallback.set_size(px);
+        }
     }
 }
 

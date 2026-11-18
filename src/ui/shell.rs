@@ -1,3 +1,4 @@
+use super::avatars;
 use gtk::prelude::*;
 
 pub struct ShellWidgets {
@@ -142,7 +143,7 @@ pub fn build_shell_page() -> ShellWidgets {
         .halign(gtk::Align::Center)
         .css_classes(["line-title-profile"])
         .build();
-    profile_title.append(&profile_avatar);
+    profile_title.append(&avatars::wrap(&profile_avatar, "", 26));
     profile_title.append(&profile_label);
     header.set_title_widget(Some(&profile_title));
 

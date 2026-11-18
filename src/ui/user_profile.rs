@@ -44,22 +44,6 @@ fn known_avatar(state: &AppState, mid: &str) -> Option<String> {
     path.filter(|p| std::path::Path::new(p).exists())
 }
 
-fn avatar_overlay(size: i32, picture: &gtk::Picture) -> gtk::Overlay {
-    let base = gtk::Box::builder()
-        .width_request(size)
-        .height_request(size)
-        .build();
-    let overlay = gtk::Overlay::builder()
-        .halign(gtk::Align::Center)
-        .valign(gtk::Align::Center)
-        .build();
-    overlay.set_child(Some(&base));
-    overlay.add_overlay(picture);
-    overlay.set_measure_overlay(picture, false);
-    overlay.set_clip_overlay(picture, true);
-    overlay
-}
-
 fn avatar_picture(class: &str) -> gtk::Picture {
     gtk::Picture::builder()
         .content_fit(gtk::ContentFit::Cover)
@@ -68,14 +52,14 @@ fn avatar_picture(class: &str) -> gtk::Picture {
         .build()
 }
 
-fn avatar_frame(size: i32, class: &str) -> (gtk::Box, gtk::Picture) {
+fn avatar_frame(size: i32, class: &str, name: &str) -> (gtk::Box, gtk::Picture) {
     let frame = gtk::Box::builder()
         .halign(gtk::Align::Center)
         .valign(gtk::Align::Start)
         .css_classes(["line-avatar-frame", class])
         .build();
     let picture = avatar_picture(class);
-    frame.append(&avatar_overlay(size, &picture));
+    frame.append(&avatars::wrap(&picture, name, size));
     (frame, picture)
 }
 
@@ -141,7 +125,7 @@ pub(super) fn update_header(state: &AppState, chat: Option<&ChatInfo>) {
         return;
     };
     let picture = avatar_picture("line-avatar-xs");
-    let overlay = avatar_overlay(32, &picture);
+    let overlay = avatars::wrap(&picture, &chat.name, 32);
     state.chat_avatar_frame.append(&overlay);
     if let Some(path) = chat
         .avatar_path
@@ -167,7 +151,7 @@ pub(super) fn header_avatar_ready(state: &AppState, mid: &str, path: &str) {
 }
 
 pub(super) fn row_avatar(state: &AppState, mid: &str) -> gtk::Box {
-    let (frame, picture) = avatar_frame(32, "line-avatar-xs");
+    let (frame, picture) = avatar_frame(32, "line-avatar-xs", &message_senders::name(state, mid));
     if let Some(path) = known_avatar(state, mid) {
         attach_texture_async(picture.clone(), path, 64);
     }
@@ -201,6 +185,23 @@ pub(super) fn avatar_ready(mid: &str, path: &str) {
             && ui.mid == mid
         {
             attach_texture_async(ui.avatar.clone(), path.to_string(), 192);
+        }
+    });
+}
+
+pub(super) fn name_ready(mid: &str, name: &str) {
+    ROW_AVATARS.with(|map| {
+        if let Some(pictures) = map.borrow().get(mid) {
+            for picture in pictures.iter().filter_map(glib::WeakRef::upgrade) {
+                avatars::set_name(&picture, name);
+            }
+        }
+    });
+    UI.with(|ui| {
+        if let Some(ui) = ui.borrow().as_ref()
+            && ui.mid == mid
+        {
+            avatars::set_name(&ui.avatar, name);
         }
     });
 }
@@ -256,7 +257,12 @@ pub(super) fn open(state: &AppState, mid: &str) {
         .margin_start(20)
         .margin_end(20)
         .build();
-    let (frame, avatar) = avatar_frame(96, "line-avatar-lg");
+    let display_name = if is_self {
+        state.self_display_name.borrow().clone()
+    } else {
+        message_senders::name(state, mid)
+    };
+    let (frame, avatar) = avatar_frame(96, "line-avatar-lg", &display_name);
     frame.set_halign(gtk::Align::Center);
     frame.set_size_request(96, 96);
     body.append(&frame);
@@ -264,11 +270,7 @@ pub(super) fn open(state: &AppState, mid: &str) {
         attach_texture_async(avatar.clone(), path, 192);
     }
     let name = gtk::Label::builder()
-        .label(if is_self {
-            state.self_display_name.borrow().clone()
-        } else {
-            message_senders::name(state, mid)
-        })
+        .label(&display_name)
         .wrap(true)
         .wrap_mode(gtk::pango::WrapMode::WordChar)
         .justify(gtk::Justification::Center)
@@ -458,6 +460,7 @@ pub(super) fn response(
         ui.note.set_visible(false);
         if !profile.name.is_empty() {
             ui.name.set_text(&profile.name);
+            avatars::set_name(&ui.avatar, &profile.name);
         }
         ui.status.set_visible(true);
         if profile.status_message.is_empty() {

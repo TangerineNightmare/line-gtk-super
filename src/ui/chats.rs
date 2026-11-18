@@ -145,6 +145,9 @@ fn update_chat_row(
     compact: bool,
 ) {
     update_chat_row_name(row, &chat.name);
+    if let Some(avatar) = state.chat_avatars.borrow().get(&chat.mid) {
+        avatars::set_name(avatar, &chat.name);
+    }
     update_chat_row_time(row, &format_activity(chat.last_activity));
     if let Some(label) = state.chat_previews.borrow().get(&chat.mid) {
         label.set_text(&chat_preview_text(chat));
@@ -269,6 +272,9 @@ pub(super) fn upsert_chat_row(state: &AppState, chat: ChatInfo) {
             && let Some(row) = state.chat_list.row_at_index(pos as i32)
         {
             update_chat_row_name(&row, &chat.name);
+            if let Some(avatar) = state.chat_avatars.borrow().get(&mid) {
+                avatars::set_name(avatar, &chat.name);
+            }
             if let Some(path) = chat.avatar_path.as_deref()
                 && std::path::Path::new(path).exists()
                 && let Some(img) = state.chat_avatars.borrow().get(&mid).cloned()
@@ -439,9 +445,7 @@ pub(super) fn build_chat_row(
         .build();
     avatar_overlay.set_child(Some(&avatar_frame));
     // 画像の解像度・縦横比を行の寸法に反映せず、表示枠に収める。
-    avatar_overlay.add_overlay(&avatar);
-    avatar_overlay.set_measure_overlay(&avatar, false);
-    avatar_overlay.set_clip_overlay(&avatar, true);
+    avatar_frame.append(&avatars::wrap(&avatar, &chat.name, avatar_px));
 
     let badge = gtk::Label::builder()
         .label(if chat.unread > 0 {
