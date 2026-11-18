@@ -564,12 +564,15 @@ fn append_message_rows(state: &AppState, msg: &MessageInfo, live: bool) {
             emojis::append(state, &bubble, msg);
             link_previews::append(&bubble, &msg.text);
         } else if show_text {
+            // Selectable text keeps the browser-style link styling while
+            // allowing drag-to-select and Ctrl+C directly in the bubble.
             let label = gtk::Label::builder()
                 .label(&msg.text)
                 .xalign(0.0)
                 .wrap(true)
                 .wrap_mode(gtk::pango::WrapMode::WordChar)
                 .max_width_chars(42)
+                .selectable(true)
                 .css_classes(["line-bubble-text"])
                 .build();
             label.set_attributes(Some(&mentions::attributes(
@@ -577,7 +580,8 @@ fn append_message_rows(state: &AppState, msg: &MessageInfo, live: bool) {
                 &msg.text,
                 &msg.mentions,
             )));
-            mentions::wire_label_click(state, &label, &msg.text, &msg.mentions);
+            let links = link_policy::link_spans(&msg.text);
+            mentions::wire_label_click(state, &label, &msg.text, &msg.mentions, &links);
             bubble.append(&label);
             link_previews::append(&bubble, &msg.text);
         } else if !has_image && !waiting_visual {

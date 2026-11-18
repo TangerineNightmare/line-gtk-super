@@ -28,12 +28,14 @@ sound preferences, chat muting, and active-conversation suppression still apply.
 Clicking the notification opens the chat.
 
 Click an individual mention in a received message to open that user's profile.
-Text messages use native GTK links, which also support Tab and Enter. Message
-bodies do not place a text cursor or start a selection when clicked. Right-click
-a message (or use Menu / Shift+F10 with its bubble focused) and choose **Copy**
-to copy the whole message, or **Select and copy…** to select part of its original
-text in a separate dialog. The dialog supports Ctrl+C, **Copy selection**, and
-**Copy all**, including the fallback text for custom LINE emoji.
+Text messages use native GTK links, which also support Tab and Enter. Bare
+http(s) URLs are styled as links by default and open in the browser when
+clicked; URLs inside code fences or HTTP tool commands stay plain text. Message
+text is selectable: drag to highlight part of a bubble and press Ctrl+C to copy
+it, or right-click a message and choose **Copy** for the whole message.
+Messages with custom LINE emoji use a read-only text view with the same
+selection and link behavior. **Select and copy…** remains available for copying
+original text that differs from what is displayed.
 
 Clicking a reply quote scrolls to its original message and briefly highlights it.
 If necessary, the client loads older history, up to 100 pages (5,000 messages).

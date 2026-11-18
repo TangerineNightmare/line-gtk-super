@@ -801,16 +801,69 @@ pub(super) fn is_user_mid(mid: &str) -> bool {
 
 // Use GTK's native links so mouse and keyboard activation do not compete
 // with text-selection gestures. Message text and IDs never become raw markup.
-fn label_markup(text: &str, spans: &[Mention]) -> (String, Vec<String>) {
+enum InlineTarget {
+    Mention(String),
+    Link(String),
+}
+
+struct InlineSpan {
+    start: usize,
+    end: usize,
+    target: InlineTarget,
+}
+
+fn overlaps(spans: &[InlineSpan], start: usize, end: usize) -> bool {
+    spans
+        .iter()
+        .any(|span| start < span.end && span.start < end)
+}
+
+fn label_markup(
+    text: &str,
+    spans: &[Mention],
+    links: &[link_policy::LinkSpan],
+) -> (String, Vec<String>, bool) {
+    let chars = text.chars().count();
+    let mut inline = Vec::new();
+    for span in spans.iter().take(100) {
+        if span.all
+            || !is_user_mid(&span.mid)
+            || span.end <= span.start
+            || span.end > chars
+            || overlaps(&inline, span.start, span.end)
+        {
+            continue;
+        }
+        inline.push(InlineSpan {
+            start: span.start,
+            end: span.end,
+            target: InlineTarget::Mention(span.mid.clone()),
+        });
+    }
+    // Mention labels win when a URL happens to sit inside one.
+    for link in links {
+        if link.kind == link_policy::LinkKind::Skip
+            || link.end <= link.start
+            || link.end > chars
+            || overlaps(&inline, link.start, link.end)
+        {
+            continue;
+        }
+        inline.push(InlineSpan {
+            start: link.start,
+            end: link.end,
+            target: InlineTarget::Link(link.url.clone()),
+        });
+    }
+    inline.sort_by_key(|span| span.start);
+
     let mut boundaries: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
     boundaries.push(text.len());
     let mut markup = String::new();
     let mut targets = Vec::new();
+    let mut has_links = false;
     let mut previous = 0;
-    for span in spans.iter().take(100) {
-        if span.all || !is_user_mid(&span.mid) || span.end <= span.start {
-            continue;
-        }
+    for span in inline {
         let (Some(&start), Some(&end)) = (boundaries.get(span.start), boundaries.get(span.end))
         else {
             continue;
@@ -818,17 +871,27 @@ fn label_markup(text: &str, spans: &[Mention]) -> (String, Vec<String>) {
         if start < previous {
             continue;
         }
+        let href = match span.target {
+            InlineTarget::Mention(mid) => {
+                let index = targets.len();
+                targets.push(mid);
+                format!("line-mention:{index}")
+            }
+            InlineTarget::Link(url) => {
+                has_links = true;
+                url
+            }
+        };
         markup.push_str(&glib::markup_escape_text(&text[previous..start]));
         markup.push_str(&format!(
-            "<a href=\"line-mention:{}\">{}</a>",
-            targets.len(),
+            "<a href=\"{}\">{}</a>",
+            glib::markup_escape_text(&href),
             glib::markup_escape_text(&text[start..end]),
         ));
-        targets.push(span.mid.clone());
         previous = end;
     }
     markup.push_str(&glib::markup_escape_text(&text[previous..]));
-    (markup, targets)
+    (markup, targets, has_links)
 }
 
 pub(super) fn wire_label_click(
@@ -836,9 +899,10 @@ pub(super) fn wire_label_click(
     label: &gtk::Label,
     text: &str,
     spans: &[Mention],
+    links: &[link_policy::LinkSpan],
 ) {
-    let (markup, targets) = label_markup(text, spans);
-    if targets.is_empty() {
+    let (markup, targets, has_links) = label_markup(text, spans, links);
+    if targets.is_empty() && !has_links {
         return;
     }
     label.set_markup(&markup);
@@ -850,6 +914,8 @@ pub(super) fn wire_label_click(
             .and_then(|index| targets.get(index))
         {
             user_profile::open(&state, mid);
+        } else if link_policy::is_safe_link(uri) {
+            super::open_uri(uri);
         }
         glib::Propagation::Stop
     });
@@ -964,17 +1030,18 @@ mod tests {
 
     #[test]
     fn mention_links_preserve_unicode_and_escape_message_text() {
-        let (markup, targets) = label_markup("😀 @A&B <hi>", &[mention(2, 6)]);
+        let (markup, targets, has_links) = label_markup("😀 @A&B <hi>", &[mention(2, 6)], &[]);
         assert_eq!(
             markup,
             "😀 <a href=\"line-mention:0\">@A&amp;B</a> &lt;hi&gt;"
         );
         assert_eq!(targets, vec!["u-person"]);
+        assert!(!has_links);
     }
 
     #[test]
     fn mention_links_skip_invalid_overlapping_and_non_user_spans() {
-        let (markup, targets) = label_markup(
+        let (markup, targets, _) = label_markup(
             "@Amy @all @Bob",
             &[
                 mention(0, 0),
@@ -990,9 +1057,45 @@ mod tests {
                 },
                 mention(10, 999),
             ],
+            &[],
         );
         assert_eq!(markup, "<a href=\"line-mention:0\">@Amy</a> @all @Bob");
         assert_eq!(targets, vec!["u-person"]);
+    }
+
+    #[test]
+    fn urls_become_links_and_mentions_win_when_ranges_overlap() {
+        let links =
+            link_policy::link_spans("見て https://example.org/a?b=1&c=2 and https://example.com/x");
+        let (markup, targets, has_links) = label_markup(
+            "見て https://example.org/a?b=1&c=2 and https://example.com/x",
+            &[],
+            &links,
+        );
+        assert!(markup.contains(
+            "<a href=\"https://example.org/a?b=1&amp;c=2\">https://example.org/a?b=1&amp;c=2</a>"
+        ));
+        assert!(has_links);
+        assert!(targets.is_empty());
+
+        let text = "@Amy https://example.org/x";
+        let links = link_policy::link_spans(text);
+        let (markup, targets, _) = label_markup(text, &[mention(5, 26)], &links);
+        assert_eq!(
+            markup,
+            "@Amy <a href=\"line-mention:0\">https://example.org/x</a>"
+        );
+        assert_eq!(targets, vec!["u-person"]);
+    }
+
+    #[test]
+    fn unsafe_or_code_urls_stay_plain_text() {
+        let text = "[bad](javascript:alert) curl https://example.org/x";
+        let links = link_policy::link_spans(text);
+        let (markup, _, has_links) = label_markup(text, &[], &links);
+        assert!(!has_links);
+        assert!(!markup.contains("<a href"));
+        assert!(markup.contains("https://example.org/x"));
     }
     #[test]
     fn notification_requires_own_identity_in_metadata() {

@@ -7,6 +7,7 @@ pub(super) struct EmojiText {
     text: String,
     emojis: Vec<LineEmoji>,
     mentions: Vec<crate::protocol::Mention>,
+    links: Vec<link_policy::LinkSpan>,
 }
 
 impl EmojiText {
@@ -63,20 +64,19 @@ fn original_offset(buffer_offset: usize, shifts: &[(usize, usize)]) -> usize {
     buffer_offset + shifted
 }
 
-fn mention_in_view(
+fn text_offset_at(
     view: &gtk::TextView,
     textures: &HashMap<String, gdk::Texture>,
     content: &EmojiText,
     x: f64,
     y: f64,
-) -> Option<String> {
+) -> Option<usize> {
     let (bx, by) = view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
     let iter = view.iter_at_location(bx, by)?;
-    let offset = original_offset(
+    Some(original_offset(
         iter.offset().max(0) as usize,
         &shifts(textures, &content.text, &content.emojis),
-    );
-    mentions::mention_at(&content.mentions, offset).map(str::to_string)
+    ))
 }
 
 fn wire_click(state: &AppState, content: &EmojiText) {
@@ -87,25 +87,32 @@ fn wire_click(state: &AppState, content: &EmojiText) {
     let press = Rc::new(std::cell::Cell::new((0.0, 0.0)));
     {
         let press = press.clone();
-        click.connect_pressed(move |gesture, _, x, y| {
-            // Conversation text is not a selection surface. Claim the press
-            // before TextView starts selecting or moves its insertion cursor.
-            gesture.set_state(gtk::EventSequenceState::Claimed);
+        click.connect_pressed(move |_, _, x, y| {
+            // Let the TextView start a text selection; a press that stays put
+            // still activates a mention or link on release.
             press.set((x, y));
         });
     }
     {
         let (state, content) = (state.clone(), content.clone());
-        click.connect_released(move |gesture, n, x, y| {
+        click.connect_released(move |_, n, x, y| {
             let (px, py) = press.get();
             if n != 1 || (x - px).abs() > 4.0 || (y - py).abs() > 4.0 {
                 return;
             }
             let textures = state.emoji_textures.borrow();
-            if let Some(mid) = mention_in_view(&content.view, &textures, &content, x, y) {
+            let Some(offset) = text_offset_at(&content.view, &textures, &content, x, y) else {
+                return;
+            };
+            if let Some(mid) = mentions::mention_at(&content.mentions, offset) {
+                let mid = mid.to_string();
                 drop(textures);
-                gesture.set_state(gtk::EventSequenceState::Claimed);
                 user_profile::open(&state, &mid);
+            } else if let Some(url) =
+                link_policy::link_at(&content.links, offset).map(|l| l.url.clone())
+            {
+                drop(textures);
+                super::open_uri(&url);
             }
         });
     }
@@ -114,10 +121,15 @@ fn wire_click(state: &AppState, content: &EmojiText) {
     {
         let (textures, content) = (state.emoji_textures.clone(), content.clone());
         motion.connect_motion(move |_, x, y| {
-            let over = mention_in_view(&content.view, &textures.borrow(), &content, x, y).is_some();
+            let textures = textures.borrow();
+            let clickable =
+                text_offset_at(&content.view, &textures, &content, x, y).is_some_and(|offset| {
+                    mentions::mention_at(&content.mentions, offset).is_some()
+                        || link_policy::link_at(&content.links, offset).is_some()
+                });
             content
                 .view
-                .set_cursor_from_name(Some(if over { "pointer" } else { "default" }));
+                .set_cursor_from_name(Some(if clickable { "pointer" } else { "text" }));
         });
     }
     content.view.add_controller(motion);
@@ -161,16 +173,16 @@ fn render(textures: &HashMap<String, gdk::Texture>, content: &EmojiText) {
         tag
     });
     tag.set_foreground_rgba(Some(&mentions::color(&content.view)));
+    let adjust = |offset: usize| {
+        offset.saturating_sub(
+            shifts
+                .iter()
+                .filter(|(end, _)| *end <= offset)
+                .map(|(_, n)| *n)
+                .sum::<usize>(),
+        )
+    };
     for mention in &content.mentions {
-        let adjust = |offset: usize| {
-            offset.saturating_sub(
-                shifts
-                    .iter()
-                    .filter(|(end, _)| *end <= offset)
-                    .map(|(_, n)| *n)
-                    .sum::<usize>(),
-            )
-        };
         if mention.start < mention.end && mention.end <= content.text.chars().count() {
             buffer.apply_tag(
                 &tag,
@@ -179,16 +191,54 @@ fn render(textures: &HashMap<String, gdk::Texture>, content: &EmojiText) {
             );
         }
     }
+    let link_tag = buffer.tag_table().lookup("link").unwrap_or_else(|| {
+        let tag = gtk::TextTag::builder()
+            .name("link")
+            .underline(gtk::pango::Underline::Single)
+            .build();
+        buffer.tag_table().add(&tag);
+        tag
+    });
+    link_tag.set_foreground_rgba(Some(&mentions::color(&content.view)));
+    for link in &content.links {
+        buffer.apply_tag(
+            &link_tag,
+            &buffer.iter_at_offset(adjust(link.start) as i32),
+            &buffer.iter_at_offset(adjust(link.end) as i32),
+        );
+    }
     let layout = content.view.create_pango_layout(Some(&measured));
     let width = (layout.pixel_size().0 + images * 14).clamp(28, 340);
     content.view.set_width_request(width);
+}
+
+fn links_for(
+    text: &str,
+    mentions: &[crate::protocol::Mention],
+    links: &[link_policy::LinkSpan],
+) -> Vec<link_policy::LinkSpan> {
+    let chars = text.chars().count();
+    links
+        .iter()
+        .filter(|link| {
+            link.kind != link_policy::LinkKind::Skip
+                && link.end > link.start
+                && link.end <= chars
+                && !mentions.iter().any(|mention| {
+                    !mention.all
+                        && mentions::is_user_mid(&mention.mid)
+                        && mention.start < link.end
+                        && link.start < mention.end
+                })
+        })
+        .cloned()
+        .collect()
 }
 
 pub(super) fn append(state: &AppState, bubble: &gtk::Box, message: &MessageInfo) {
     let view = gtk::TextView::builder()
         .editable(false)
         .cursor_visible(false)
-        .focusable(false)
         .wrap_mode(gtk::WrapMode::WordChar)
         .accepts_tab(false)
         .css_classes(["line-bubble-text", "line-emoji-text"])
@@ -200,6 +250,11 @@ pub(super) fn append(state: &AppState, bubble: &gtk::Box, message: &MessageInfo)
         text: message.text.clone(),
         emojis: message.emojis.clone(),
         mentions: message.mentions.clone(),
+        links: links_for(
+            &message.text,
+            &message.mentions,
+            &link_policy::link_spans(&message.text),
+        ),
     };
     render(&state.emoji_textures.borrow(), &content);
     // 親の日本語フォントが適用された後に幅を測り直す。
@@ -208,6 +263,7 @@ pub(super) fn append(state: &AppState, bubble: &gtk::Box, message: &MessageInfo)
     let text = message.text.clone();
     let emojis = message.emojis.clone();
     let mentions = message.mentions.clone();
+    let links = content.links.clone();
     view.connect_map(move |_| {
         if let Some(view) = weak.upgrade() {
             render(
@@ -217,6 +273,7 @@ pub(super) fn append(state: &AppState, bubble: &gtk::Box, message: &MessageInfo)
                     text: text.clone(),
                     emojis: emojis.clone(),
                     mentions: mentions.clone(),
+                    links: links.clone(),
                 },
             );
         }
@@ -282,5 +339,23 @@ mod tests {
         assert_eq!(&text[..ranges[0].0], "😀前");
         assert_eq!(&text[ranges[0].0..ranges[0].1], "(顔)");
         assert_eq!(&text[ranges[0].1..], "後");
+    }
+
+    #[test]
+    fn emoji_messages_link_urls_but_not_code_or_mention_ranges() {
+        let text = "😀 see https://example.org/x";
+        let mentions = vec![crate::protocol::Mention {
+            start: 6,
+            end: 27,
+            mid: "u-person".into(),
+            all: false,
+        }];
+        let links = link_policy::link_spans(text);
+        assert_eq!(links.len(), 1);
+        assert!(links_for(text, &mentions, &links).is_empty());
+        assert_eq!(links_for(text, &[], &links).len(), 1);
+        let code = "```\nhttps://example.org/x\n```";
+        let links = link_policy::link_spans(code);
+        assert!(links_for(code, &[], &links).is_empty());
     }
 }

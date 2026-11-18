@@ -51,23 +51,51 @@ pub(super) enum LinkKind {
     Preview,
 }
 
+/// A URL in message text, with the character range that should render as a link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LinkSpan {
+    pub(super) url: String,
+    pub(super) start: usize,
+    pub(super) end: usize,
+    pub(super) kind: LinkKind,
+}
+
 /// URLs in `text` (in order) with the treatment each one gets.
 pub(super) fn classify_links(text: &str) -> Vec<(String, LinkKind)> {
+    link_spans(text)
+        .into_iter()
+        .map(|span| (span.url, span.kind))
+        .collect()
+}
+
+/// URLs in `text` with their character offsets, so callers can style exactly the
+/// URL text while leaving surrounding punctuation alone.
+pub(super) fn link_spans(text: &str) -> Vec<LinkSpan> {
     let mut out = Vec::new();
     let mut in_fence = false;
-    for line in text.lines() {
+    let mut line_char = 0usize;
+    for raw_line in text.split_inclusive('\n') {
+        let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
+        let line = line.strip_suffix('\r').unwrap_or(line);
         if line.trim_start().starts_with("```") {
             in_fence = !in_fence;
+            line_char += raw_line.chars().count();
             continue;
         }
         let mut after_tool = false;
+        let mut cursor = 0usize;
         for token in line.split_whitespace() {
+            let Some(offset) = line[cursor..].find(token) else {
+                continue;
+            };
+            let token_byte = cursor + offset;
+            cursor = token_byte + token.len();
             let bare = token.trim_start_matches(['$', '>', '#']);
             if HTTP_TOOLS.contains(&bare) {
                 after_tool = true;
                 continue;
             }
-            let Some(url) = clean_url(token) else {
+            let Some((start, end, url)) = clean_url(token) else {
                 continue;
             };
             let kind = if in_fence || after_tool {
@@ -75,29 +103,59 @@ pub(super) fn classify_links(text: &str) -> Vec<(String, LinkKind)> {
             } else {
                 classify_url(&url)
             };
-            out.push((url, kind));
+            let start_byte = token_byte + start;
+            let end_byte = token_byte + end;
+            out.push(LinkSpan {
+                url,
+                start: line_char + line[..start_byte].chars().count(),
+                end: line_char + line[..end_byte].chars().count(),
+                kind,
+            });
         }
+        line_char += raw_line.chars().count();
     }
     out
 }
 
-fn clean_url(token: &str) -> Option<String> {
-    let t = token
-        .trim_matches(|c: char| matches!(c, ')' | '(' | ']' | '[' | '.' | ',' | ';' | '"' | '\''));
-    (t.starts_with("http://") || t.starts_with("https://")).then(|| t.to_string())
+/// The link covering a character offset, if any.
+pub(super) fn link_at(links: &[LinkSpan], offset: usize) -> Option<&LinkSpan> {
+    links
+        .iter()
+        .find(|link| link.start <= offset && offset < link.end)
+}
+
+/// True for URLs the client may hand to the desktop. Credentials are refused so
+/// a link cannot disguise the host it actually contacts.
+pub(super) fn is_safe_link(url: &str) -> bool {
+    Url::parse(url).is_ok_and(|parsed| {
+        matches!(parsed.scheme(), "http" | "https")
+            && parsed.username().is_empty()
+            && parsed.password().is_none()
+            && parsed.host_str().is_some()
+    })
+}
+
+/// `Some((start, end, url))` in bytes relative to `token`, with surrounding
+/// punctuation removed.
+fn clean_url(token: &str) -> Option<(usize, usize, String)> {
+    let trim = |c: char| matches!(c, ')' | '(' | ']' | '[' | '.' | ',' | ';' | '"' | '\'');
+    let start = token.len() - token.trim_start_matches(trim).len();
+    let end = token.trim_end_matches(trim).len();
+    if end <= start {
+        return None;
+    }
+    let url = &token[start..end];
+    (url.starts_with("http://") || url.starts_with("https://"))
+        .then(|| (start, end, url.to_string()))
 }
 
 fn classify_url(url: &str) -> LinkKind {
+    if !is_safe_link(url) {
+        return LinkKind::Skip;
+    }
     let Ok(parsed) = Url::parse(url) else {
         return LinkKind::Skip;
     };
-    if !matches!(parsed.scheme(), "http" | "https")
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.host_str().is_none()
-    {
-        return LinkKind::Skip;
-    }
     if is_preview_url(&parsed) {
         LinkKind::Preview
     } else {
@@ -248,6 +306,43 @@ mod tests {
         assert_eq!(kinds("https://youtube.com.evil.io/a"), [LinkKind::OpenOnly]);
         assert_eq!(kinds("https://evilyoutube.com/a"), [LinkKind::OpenOnly]);
         assert_eq!(kinds("https://user:pw@youtube.com/a"), [LinkKind::Skip]);
+    }
+
+    #[test]
+    fn spans_cover_only_the_url_text() {
+        let text = "見て: (https://example.org/a?b=1&c=2), 次へ https://example.com/x.";
+        let spans = link_spans(text);
+        assert_eq!(spans.len(), 2);
+        let first: String = text
+            .chars()
+            .skip(spans[0].start)
+            .take(spans[0].end - spans[0].start)
+            .collect();
+        assert_eq!(first, "https://example.org/a?b=1&c=2");
+        let second: String = text
+            .chars()
+            .skip(spans[1].start)
+            .take(spans[1].end - spans[1].start)
+            .collect();
+        assert_eq!(second, "https://example.com/x");
+        assert_eq!(link_at(&spans, spans[1].start + 1).unwrap().url, second);
+        assert!(link_at(&spans, 0).is_none());
+    }
+
+    #[test]
+    fn spans_skip_code_and_command_urls() {
+        let spans =
+            link_spans("```\nhttps://youtube.com/watch?v=a\n```\nhttps://youtube.com/watch?v=b");
+        assert_eq!(
+            spans.iter().map(|span| span.kind).collect::<Vec<_>>(),
+            [LinkKind::Skip, LinkKind::Preview]
+        );
+        assert_eq!(spans[1].url, "https://youtube.com/watch?v=b");
+        assert_eq!(spans[1].start, 38);
+        assert_eq!(
+            link_spans("curl -X POST https://api.example.com/v1")[0].kind,
+            LinkKind::Skip
+        );
     }
 
     #[test]
