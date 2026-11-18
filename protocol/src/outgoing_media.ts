@@ -475,12 +475,23 @@ export function createOutgoingMedia(runtime: OutgoingMediaRuntime) {
       fail(id, "chatMid and filePath required");
       return;
     }
+    // The request id lets the UI show progress under the matching bubble.
     const report = (progress: number, label: string) => {
       emitEvent("upload_progress", {
         chatMid,
+        requestId: id ?? undefined,
         progress,
         label,
         done: false,
+      });
+    };
+    const reportDone = (progress: number, label: string) => {
+      emitEvent("upload_progress", {
+        chatMid,
+        requestId: id ?? undefined,
+        progress,
+        label,
+        done: true,
       });
     };
     try {
@@ -488,24 +499,14 @@ export function createOutgoingMedia(runtime: OutgoingMediaRuntime) {
       const data = await Deno.readFile(filePath);
       if (data.length < 32) {
         fail(id, "file_too_small");
-        emitEvent("upload_progress", {
-          chatMid,
-          progress: 0,
-          label: "",
-          done: true,
-        });
+        reportDone(0, "");
         return;
       }
       const name = filePath.split("/").pop() || "file.bin";
       const oType = normalizeMediaOType(oTypeRaw ?? "auto", name);
       if (oType === "audio" && data.length < 1024) {
         fail(id, "audio_file_too_small");
-        emitEvent("upload_progress", {
-          chatMid,
-          progress: 0,
-          label: "",
-          done: true,
-        });
+        reportDone(0, "");
         return;
       }
       const mime = guessMime(name, oType);
@@ -588,12 +589,7 @@ export function createOutgoingMedia(runtime: OutgoingMediaRuntime) {
             contentType: mediaContentType(oType),
           };
         } catch (e3) {
-          emitEvent("upload_progress", {
-            chatMid,
-            progress: 0,
-            label: "",
-            done: true,
-          });
+          reportDone(0, "");
           fail(
             id,
             e3 instanceof Error ? e3.message : String(e3),
@@ -621,20 +617,10 @@ export function createOutgoingMedia(runtime: OutgoingMediaRuntime) {
           (oType === "image" || oType === "gif" || oType === "video"),
       };
       touchChatPreviewFromMessage(message);
-      emitEvent("upload_progress", {
-        chatMid,
-        progress: 1,
-        label: "Sent",
-        done: true,
-      });
+      reportDone(1, "Sent");
       ok(id, { message });
     } catch (e) {
-      emitEvent("upload_progress", {
-        chatMid,
-        progress: 0,
-        label: "",
-        done: true,
-      });
+      reportDone(0, "");
       fail(id, e instanceof Error ? e.message : String(e));
     }
   }

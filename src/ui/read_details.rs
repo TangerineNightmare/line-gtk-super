@@ -47,6 +47,26 @@ pub(super) fn send_unknown(state: &AppState, id: &str) {
     }
 }
 
+/// Show upload percent in the status line under a pending bubble.
+pub(super) fn set_upload_progress(state: &AppState, id: &str, progress: f64) {
+    let mut slots = state.receipt_slots.borrow_mut();
+    let Some(slot) = slots.get_mut(id) else {
+        return;
+    };
+    let percent = (progress.clamp(0.0, 1.0) * 100.0).floor() as u32;
+    slot.status
+        .set_text(&format!("{} {percent}%", crate::i18n::t("media_uploading")));
+    slot.readers.set_visible(false);
+}
+
+/// Leave the upload status behind once the sidecar confirms the send.
+pub(super) fn set_upload_done(state: &AppState, id: &str) {
+    if let Some(slot) = state.receipt_slots.borrow_mut().get_mut(id) {
+        slot.status.set_text(&crate::i18n::t("media_upload_sent"));
+        slot.readers.set_visible(false);
+    }
+}
+
 pub(super) fn metadata(state: &AppState, message: &MessageInfo) -> gtk::Box {
     let row = gtk::Box::builder()
         .spacing(6)

@@ -698,6 +698,7 @@ pub(super) fn handle_event(state: &AppState, ev: ProtocolEvent) {
         } => show_message_download_percent(state, &message_id, progress),
         ProtocolEvent::UploadProgress {
             chat_mid,
+            request_id,
             progress,
             label,
             done,
@@ -705,6 +706,7 @@ pub(super) fn handle_event(state: &AppState, ev: ProtocolEvent) {
             if state.current_chat.borrow().as_deref() != Some(chat_mid.as_str()) {
                 return;
             }
+            let placeholder = request_id.and_then(|id| send_placeholder(state, id));
             if done {
                 if progress >= 1.0 {
                     state.upload_bar.set_fraction(1.0);
@@ -714,6 +716,9 @@ pub(super) fn handle_event(state: &AppState, ev: ProtocolEvent) {
                         label
                     };
                     state.upload_label.set_text(&text);
+                    if let Some(id) = placeholder.as_deref() {
+                        read_details::set_upload_done(state, id);
+                    }
                     let s = state.clone();
                     glib::timeout_add_local_once(
                         std::time::Duration::from_millis(450),
@@ -727,6 +732,9 @@ pub(super) fn handle_event(state: &AppState, ev: ProtocolEvent) {
                 return;
             }
             show_upload_progress(state, progress, &label);
+            if let Some(id) = placeholder.as_deref() {
+                read_details::set_upload_progress(state, id, progress);
+            }
         }
         ProtocolEvent::Response {
             id,
@@ -1175,6 +1183,14 @@ pub(super) fn handle_event(state: &AppState, ev: ProtocolEvent) {
 }
 
 const MAX_SIDECAR_RECOVERY_ATTEMPTS: u8 = 3;
+
+/// Map an upload's request id to its optimistic bubble while it is pending.
+fn send_placeholder(state: &AppState, request_id: u64) -> Option<String> {
+    match state.pending.borrow().get(&request_id) {
+        Some(Pending::Send { placeholder_id, .. }) => Some(placeholder_id.clone()),
+        _ => None,
+    }
+}
 
 pub(super) fn schedule_sidecar_recovery(state: &AppState) {
     if *state.recovery_scheduled.borrow() {

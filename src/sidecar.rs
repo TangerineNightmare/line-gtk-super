@@ -13,6 +13,17 @@ use std::time::{Duration, Instant};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// LINE uploads carry the whole file before answering. Scale the deadline with
+/// the file size (a slow 64 KiB/s link plus setup overhead) instead of failing
+/// a large send at the normal request deadline.
+fn upload_timeout(file_path: &str) -> Duration {
+    let bytes = std::fs::metadata(file_path)
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    let secs = 120 + bytes / (64 * 1024);
+    Duration::from_secs(secs.clamp(120, 1800))
+}
+
 fn request_timeout(method: &str) -> Duration {
     if method.starts_with("login_") {
         Duration::from_secs(420)
@@ -253,6 +264,15 @@ impl Sidecar {
     }
 
     pub fn request(&self, method: &str, params: Option<Value>) -> Result<u64> {
+        self.request_with_timeout(method, params, request_timeout(method))
+    }
+
+    fn request_with_timeout(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        timeout: Duration,
+    ) -> Result<u64> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let params = message_operation_params(method, params, self.session_generation(), id);
         let req = Request {
@@ -284,9 +304,7 @@ impl Sidecar {
             }
             return Err(error.into());
         }
-        let _ = self
-            .timeout_tx
-            .send((id, Instant::now() + request_timeout(method)));
+        let _ = self.timeout_tx.send((id, Instant::now() + timeout));
         Ok(id)
     }
 
@@ -431,7 +449,7 @@ impl Sidecar {
         if let Some(ms) = duration_ms {
             params["durationMs"] = json!(ms);
         }
-        self.request("send_audio", Some(params))
+        self.request_with_timeout("send_audio", Some(params), upload_timeout(file_path))
     }
 
     pub fn send_media(
@@ -449,7 +467,7 @@ impl Sidecar {
         if let Some(ms) = duration_ms {
             params["durationMs"] = json!(ms);
         }
-        self.request("send_media", Some(params))
+        self.request_with_timeout("send_media", Some(params), upload_timeout(file_path))
     }
 
     pub fn download_media(
@@ -1160,6 +1178,7 @@ fn read_loop<R: std::io::Read>(
                                 .and_then(|v| v.as_str())
                                 .unwrap_or_default()
                                 .to_string(),
+                            request_id: resp.extra.get("requestId").and_then(|v| v.as_u64()),
                             progress: resp
                                 .extra
                                 .get("progress")
@@ -1439,6 +1458,40 @@ mod authentication_tests {
         assert_eq!(request_timeout("ping"), Duration::from_secs(30));
         assert!(request_timeout("login_email") > Duration::from_secs(360));
         assert!(request_timeout("login_qr") > Duration::from_secs(360));
+    }
+
+    #[test]
+    fn media_upload_deadline_grows_with_the_file() {
+        let missing = std::env::temp_dir().join("line-gtk-no-such-upload.bin");
+        assert_eq!(
+            upload_timeout(missing.to_str().unwrap()),
+            Duration::from_secs(120)
+        );
+        let dir = std::env::temp_dir().join(format!("line-gtk-upload-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("payload.bin");
+        std::fs::write(&file, vec![0_u8; 2 * 1024 * 1024]).unwrap();
+        // 2 MiB at 64 KiB/s adds 32 seconds on top of the setup allowance.
+        assert_eq!(
+            upload_timeout(file.to_str().unwrap()),
+            Duration::from_secs(152)
+        );
+        assert!(upload_timeout(file.to_str().unwrap()) > request_timeout("send_media"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn upload_progress_carries_the_request_id() {
+        let (tx, rx) = async_channel::unbounded();
+        let pending = Arc::new(Mutex::new(HashSet::new()));
+        let generation = AtomicU64::new(1);
+        let event = b"{\"event\":\"upload_progress\",\"chatMid\":\"c-one\",\"requestId\":42,\"progress\":0.4,\"label\":\"Uploading\",\"done\":false}\n";
+        read_loop(&event[..], tx, pending, &generation, 1);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ProtocolEvent::UploadProgress { chat_mid, request_id, progress, .. }
+                if chat_mid == "c-one" && request_id == Some(42) && (progress - 0.4).abs() < 0.001
+        ));
     }
 
     #[test]

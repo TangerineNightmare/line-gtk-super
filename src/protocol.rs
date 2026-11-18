@@ -490,6 +490,8 @@ pub enum ProtocolEvent {
     },
     UploadProgress {
         chat_mid: String,
+        /// Request that owns the upload, so the UI can update its bubble.
+        request_id: Option<u64>,
         progress: f64,
         label: String,
         done: bool,
