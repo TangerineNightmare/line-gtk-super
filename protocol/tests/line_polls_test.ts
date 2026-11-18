@@ -52,6 +52,31 @@ function jwt(claims: Record<string, unknown>) {
 
 type Call = { url: string; init?: RequestInit };
 
+Deno.test("session replacement while issuing LIFF prevents poll submission", async () => {
+  const calls: Call[] = [];
+  const first = fakeClient([], calls);
+  const second = fakeClient([], calls);
+  let current = first;
+  first.base.liff.issueLiffView = () => {
+    current = second;
+    return Promise.resolve({ accessToken: "old-token" });
+  };
+  const service = createLinePollService(() => current);
+  await assertRejects(
+    () =>
+      service.create("c-group", {
+        title: "Lunch?",
+        choices: ["A", "B"],
+        multiple: false,
+        anonymous: false,
+        allowNewChoices: false,
+      }),
+    Error,
+    "session_changed",
+  );
+  assertEquals(calls, []);
+});
+
 function fakeClient(
   responses: Array<{ status?: number; body: unknown }>,
   calls: Call[],
@@ -337,4 +362,44 @@ Deno.test("a cached token is never reused by another logged-in account", async (
     (calls[i].init!.headers as Record<string, string>)["X-Liff-Token"];
   assertEquals(header(0), "Bearer token-1");
   assertEquals(header(1), "Bearer token-101");
+});
+
+Deno.test("close follows verified LIFF GET endpoint and reads authoritative closed state", async () => {
+  const calls: Call[] = [];
+  const service = createLinePollService(() => client);
+  const client = fakeClient([{ body: { result: detail } }, {
+    body: { result: null },
+  }, { body: { result: { ...detail, closed: true } } }], calls);
+  assertEquals(
+    (await service.close("c-group", detail.questionId)).closed,
+    true,
+  );
+  assertEquals(calls.map((c) => [c.url, c.init?.method]), [
+    [`https://w.line.me/poll/ajax/poll/question/${detail.questionId}`, "GET"],
+    [
+      `https://w.line.me/poll/ajax/poll/question/${detail.questionId}/close`,
+      "GET",
+    ],
+    [`https://w.line.me/poll/ajax/poll/question/${detail.questionId}`, "GET"],
+  ]);
+});
+Deno.test("close refuses an unauthorized account and is a no-op for an already closed poll", async () => {
+  for (const closed of [false, true]) {
+    const calls: Call[] = [];
+    const client = fakeClient([{
+      body: { result: { ...detail, closed, closeable: false } },
+    }], calls);
+    const service = createLinePollService(() => client);
+    if (closed) {
+      assertEquals(
+        (await service.close("c-group", detail.questionId)).closed,
+        true,
+      );
+    } else {await assertRejects(
+        () => service.close("c-group", detail.questionId),
+        Error,
+        "poll_close_forbidden",
+      );}
+    assertEquals(calls.length, 1);
+  }
 });

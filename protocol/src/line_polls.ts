@@ -239,6 +239,9 @@ export function createLinePollService(
     const client = getClient();
     if (!client) throw new Error("not_logged_in");
     const auth = await session(chatMid);
+    if (getClient() !== client || auth.client !== client) {
+      throw new Error("session_changed");
+    }
     const response = await client.base.fetch(`${POLL_ORIGIN}/poll${path}`, {
       method: init.method ?? "GET",
       headers: {
@@ -316,5 +319,14 @@ export function createLinePollService(
     return { pollId: id };
   }
 
-  return { get, vote, create, call };
+  // Verified from LINE's public LIFF bundle app.effc8ca6a831dd639893.js:
+  // closePoll uses Cc(path + "/close") with Cc's default GET method.
+  async function close(chatMid: string, pollId: string): Promise<PollView> {
+    const poll = await get(chatMid, pollId);
+    if (poll.closed) return poll;
+    if (!poll.closeable) throw new Error("poll_close_forbidden");
+    await call(chatMid, `${pollPath(pollId)}/close`);
+    return await get(chatMid, pollId);
+  }
+  return { get, vote, create, close, call };
 }
