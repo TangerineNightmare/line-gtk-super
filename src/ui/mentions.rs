@@ -932,6 +932,14 @@ pub(super) fn mentions_account(message: &MessageInfo, account: Option<&str>) -> 
         })
 }
 
+/// A quoted reply to one of the account's own messages alerts like a mention.
+pub(super) fn replies_to_account(message: &MessageInfo, account: Option<&str>) -> bool {
+    !message.mine
+        && !message.decryption_failed
+        && account.is_some()
+        && message.reply_to.as_ref().is_some_and(|quote| quote.mine)
+}
+
 #[cfg(test)]
 #[path = "mentions_test.rs"]
 mod picker_tests;
@@ -1108,5 +1116,19 @@ mod tests {
         assert!(!mentions_account(&msg, None));
         msg.mine = true;
         assert!(!mentions_account(&msg, Some("u-me")));
+    }
+    #[test]
+    fn quoted_replies_to_own_messages_alert_like_mentions() {
+        let mut msg: MessageInfo = serde_json::from_value(serde_json::json!({
+            "text":"ok", "replyTo":{"messageId":"1","mine":true}
+        }))
+        .unwrap();
+        assert!(replies_to_account(&msg, Some("u-me")));
+        assert!(!replies_to_account(&msg, None));
+        msg.reply_to.as_mut().unwrap().mine = false;
+        assert!(!replies_to_account(&msg, Some("u-me")));
+        msg.reply_to.as_mut().unwrap().mine = true;
+        msg.mine = true;
+        assert!(!replies_to_account(&msg, Some("u-me")));
     }
 }

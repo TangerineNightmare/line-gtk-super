@@ -105,6 +105,7 @@ pub(super) fn notify_incoming(state: &AppState, msg: &MessageInfo, peer_mid: &st
     let reply_token = super::notification_reply::register(state, msg, peer_mid, &name);
     let meta = PendingNotif {
         mentioned: super::mentions::mentions_account(msg, state.self_mid.borrow().as_deref()),
+        replied: super::mentions::replies_to_account(msg, state.self_mid.borrow().as_deref()),
         chat_mid: peer_mid.to_string(),
         sender_mid: message_senders::is_group_chat(state, peer_mid).then(|| msg.from.clone()),
         displayed_sender: None,
@@ -269,12 +270,15 @@ fn deliver(state: &AppState, message_id: &str, meta: PendingNotif) {
         .sender_mid
         .as_deref()
         .map(|mid| message_senders::name(state, mid));
-    let title = if meta.recent_bodies.len() > 1 && !meta.mentioned {
+    let highlighted = meta.mentioned || meta.replied;
+    let title = if meta.recent_bodies.len() > 1 && !highlighted {
         meta.title.clone()
     } else if let Some(sender) = sender_name.as_deref() {
         crate::i18n::tf(
             if meta.mentioned {
                 "notification_group_mention"
+            } else if meta.replied {
+                "notification_group_reply"
             } else {
                 "notification_group_sender"
             },
@@ -500,6 +504,7 @@ mod tests {
     fn pending(chat_mid: &str, account: &str, created: Instant) -> PendingNotif {
         PendingNotif {
             mentioned: false,
+            replied: false,
             chat_mid: chat_mid.into(),
             sender_mid: None,
             displayed_sender: None,

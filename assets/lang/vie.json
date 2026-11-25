@@ -635,6 +635,7 @@
   "mention_load_failed": "Không tải được thành viên. Thử lại (F5).",
   "mention_no_members": "Không tìm thấy thành viên phù hợp",
   "notification_group_mention": "{sender} đã nhắc đến bạn trong {group}",
+  "notification_group_reply": "{sender} đã trả lời bạn trong {group}",
   "reply_loading_original": "Đang tải tin nhắn gốc…",
   "reply_open_original": "Mở tin nhắn gốc",
   "reply_original_unavailable": "Không tìm thấy tin nhắn gốc.",

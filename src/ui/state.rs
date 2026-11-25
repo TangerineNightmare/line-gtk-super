@@ -203,6 +203,7 @@ pub(super) struct AppState {
 #[derive(Debug, Clone)]
 pub(super) struct PendingNotif {
     pub mentioned: bool,
+    pub replied: bool,
     pub chat_mid: String,
     pub sender_mid: Option<String>,
     pub displayed_sender: Option<String>,
