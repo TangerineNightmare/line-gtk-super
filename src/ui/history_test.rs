@@ -115,6 +115,262 @@ fn fixture_image_viewer_context_menu_copies_full_image() {
     println!("Image copy screenshots: {}", root.display());
 }
 
+#[test]
+#[ignore = "requires a desktop display and isolated XDG directories; uses a fixture sidecar"]
+fn fixture_file_preview_navigates_in_chat_order_and_ignores_late_downloads() {
+    let (state, root) = fixture_state("file-preview");
+    state.stack.set_visible_child_name("shell");
+    set_msg_state(&state, "list", None);
+    state.window.present();
+    let image = Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, true, 8, 600, 600).unwrap();
+    image.fill(0x3388ccff);
+    let image_path = root.join("first.png");
+    image.savev(&image_path, "png", &[]).unwrap();
+    let slow_path = root.join("slow.txt");
+    std::fs::write(&slow_path, "Finished download").unwrap();
+    let text_path = root.join("last.txt");
+    std::fs::write(&text_path, "Cached document").unwrap();
+    for (id, name, path) in [
+        (30, "first.png", Some(&image_path)),
+        (10, "slow.txt", None),
+        (20, "last.txt", Some(&text_path)),
+    ] {
+        let mut file = message(id);
+        file.created_time = 1700000000000;
+        file.content_type = "FILE".into();
+        file.file_name = Some(name.into());
+        file.file_path = path.map(|path| path.to_str().unwrap().into());
+        append_message(&state, &file, false);
+        if id == 30 {
+            append_message(&state, &message(99), false);
+        }
+    }
+    let first_row = state.message_rows.borrow()["30"].clone();
+    let file_card = find(first_row.upcast_ref(), &|w| {
+        w.has_css_class("line-file-card")
+    })
+    .unwrap()
+    .downcast::<gtk::Button>()
+    .unwrap();
+    file_card.emit_clicked();
+    settle();
+    let viewer = visible_window(|window| window.has_css_class("line-media-viewer"));
+    let title = preview_title(&viewer);
+    let previous = preview_arrow(&viewer, "go-previous-symbolic");
+    let next = preview_arrow(&viewer, "go-next-symbolic");
+    let controllers = viewer.observe_controllers();
+    let keys = (0..controllers.n_items())
+        .filter_map(|i| {
+            controllers
+                .item(i)?
+                .downcast::<gtk::EventControllerKey>()
+                .ok()
+        })
+        .find(|keys| keys.propagation_phase() == gtk::PropagationPhase::Capture)
+        .unwrap();
+    let press =
+        |key| keys.emit_by_name::<bool>("key-pressed", &[&key, &0u32, &gdk::ModifierType::empty()]);
+    assert_eq!(title.text(), "first.png");
+    assert!(!previous.is_sensitive());
+    assert!(press(gdk::Key::Left));
+    assert_eq!(title.text(), "first.png");
+
+    let old_image = find(viewer.upcast_ref(), &|w| {
+        w.has_css_class("line-media-viewer-image")
+    })
+    .unwrap()
+    .downgrade();
+    next.emit_clicked();
+    assert_eq!(title.text(), "slow.txt");
+    let request = state
+        .pending
+        .borrow()
+        .iter()
+        .find_map(|(id, request)| {
+            matches!(request, Pending::PreviewDownload { chat_message: Some(message_id), .. }
+            if message_id == "10")
+            .then_some(*id)
+        })
+        .unwrap();
+    assert!(press(gdk::Key::Right));
+    assert_eq!(title.text(), "last.txt");
+    assert!(!next.is_sensitive());
+    assert!(previous.is_sensitive());
+    handle_event(
+        &state,
+        ProtocolEvent::Response {
+            id: request,
+            ok: true,
+            result: serde_json::json!({ "path": slow_path }),
+            error: None,
+        },
+    );
+    settle();
+    assert_eq!(title.text(), "last.txt");
+    assert!(old_image.upgrade().is_none());
+
+    previous.emit_clicked();
+    assert_eq!(title.text(), "slow.txt");
+    let text = find(viewer.upcast_ref(), &|w| w.is::<gtk::TextView>())
+        .unwrap()
+        .downcast::<gtk::TextView>()
+        .unwrap()
+        .buffer();
+    assert_eq!(
+        text.text(&text.start_iter(), &text.end_iter(), false),
+        "Finished download"
+    );
+    assert!(press(gdk::Key::Left));
+    assert_eq!(title.text(), "first.png");
+    assert!(!previous.is_sensitive());
+    viewer.close();
+    state.window.destroy();
+    let _ = state.sidecar.request("fixture_exit", None);
+}
+
+#[test]
+#[ignore = "requires a desktop display and isolated XDG directories; uses a fixture sidecar"]
+fn fixture_file_preview_follows_the_shared_media_page_and_retries_downloads() {
+    let (state, root) = fixture_state("shared-file-preview");
+    *state.session_ready.borrow_mut() = true;
+    shared_media::open(&state);
+    let shared_title = crate::i18n::t("shared_media");
+    let shared = visible_window(|window| window.title().as_deref() == Some(shared_title.as_str()));
+    let files = crate::i18n::t("shared_media_files");
+    find(shared.upcast_ref(), &|w| {
+        w.downcast_ref::<gtk::ToggleButton>()
+            .is_some_and(|button| button.label().as_deref() == Some(files.as_str()))
+    })
+    .unwrap()
+    .downcast::<gtk::ToggleButton>()
+    .unwrap()
+    .set_active(true);
+    let page = state
+        .pending
+        .borrow()
+        .iter()
+        .find_map(|(id, request)| {
+            matches!(
+                request,
+                Pending::SharedMedia {
+                    request: shared_media::SharedMediaRequest::List { category: 2, .. },
+                    ..
+                }
+            )
+            .then_some(*id)
+        })
+        .unwrap();
+    let items = [(30, "newer.txt"), (10, "older.txt")].map(|(id, name)| {
+        serde_json::json!({
+            "key": id.to_string(), "messageId": id.to_string(), "chatMid": "c-fixture",
+            "createdTime": 1700000000000_i64 + id, "senderMid": "u-friend",
+            "kind": "file", "fileName": name,
+        })
+    });
+    handle_event(
+        &state,
+        ProtocolEvent::Response {
+            id: page,
+            ok: true,
+            error: None,
+            result: serde_json::json!({
+                "chatMid": "c-fixture", "category": "files", "items": items, "scanState": "complete",
+            }),
+        },
+    );
+    find(shared.upcast_ref(), &|w| {
+        w.is::<gtk::Button>()
+            && w.tooltip_text()
+                .is_some_and(|text| text.starts_with("newer.txt\n"))
+    })
+    .unwrap()
+    .downcast::<gtk::Button>()
+    .unwrap()
+    .emit_clicked();
+    let viewer = visible_window(|window| window.has_css_class("line-media-viewer"));
+    let title = preview_title(&viewer);
+    let previous = preview_arrow(&viewer, "go-previous-symbolic");
+    let next = preview_arrow(&viewer, "go-next-symbolic");
+    let complete = |target, file: Option<&str>| {
+        let id = state
+            .pending
+            .borrow()
+            .iter()
+            .find_map(|(id, request)| {
+                matches!(request, Pending::PreviewDownload { index, chat_message: None, .. }
+                if *index == target)
+                .then_some(*id)
+            })
+            .unwrap();
+        let result = file
+            .map(|name| {
+                let path = root.join(name);
+                std::fs::write(&path, name).unwrap();
+                serde_json::json!({ "path": path, "fileName": name, "contentType": "FILE" })
+            })
+            .unwrap_or_default();
+        handle_event(
+            &state,
+            ProtocolEvent::Response {
+                id,
+                ok: file.is_some(),
+                result,
+                error: None,
+            },
+        );
+        id
+    };
+    complete(0, Some("newer.txt"));
+    assert_eq!(title.text(), "newer.txt");
+    assert!(!previous.is_sensitive());
+    next.emit_clicked();
+    assert_eq!(title.text(), "older.txt");
+    assert!(!next.is_sensitive());
+    let failed = complete(1, None);
+    let retry = crate::i18n::t("retry");
+    find(viewer.upcast_ref(), &|w| {
+        w.downcast_ref::<gtk::Button>()
+            .is_some_and(|button| button.label().as_deref() == Some(retry.as_str()))
+    })
+    .unwrap()
+    .downcast::<gtk::Button>()
+    .unwrap()
+    .emit_clicked();
+    assert_ne!(complete(1, Some("older.txt")), failed);
+    previous.emit_clicked();
+    assert_eq!(title.text(), "newer.txt");
+    assert!(find(viewer.upcast_ref(), &|w| w.is::<gtk::TextView>()).is_some());
+    viewer.close();
+    shared.close();
+    state.window.destroy();
+    let _ = state.sidecar.request("fixture_exit", None);
+}
+
+fn visible_window(predicate: impl Fn(&gtk::Window) -> bool) -> gtk::Window {
+    gtk::Window::list_toplevels()
+        .into_iter()
+        .filter_map(|widget| widget.downcast::<gtk::Window>().ok())
+        .find(|window| window.is_visible() && predicate(window))
+        .unwrap()
+}
+
+fn preview_title(window: &gtk::Window) -> gtk::Label {
+    find(window.upcast_ref(), &|w| w.has_css_class("heading"))
+        .unwrap()
+        .downcast()
+        .unwrap()
+}
+
+fn preview_arrow(window: &gtk::Window, icon: &str) -> gtk::Button {
+    find(window.upcast_ref(), &|w| {
+        w.downcast_ref::<gtk::Button>()
+            .is_some_and(|button| button.icon_name().as_deref() == Some(icon))
+    })
+    .unwrap()
+    .downcast()
+    .unwrap()
+}
+
 pub(super) fn settle() {
     let context = glib::MainContext::default();
     let until = Instant::now() + Duration::from_millis(250);

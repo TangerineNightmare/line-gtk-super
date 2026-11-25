@@ -443,6 +443,16 @@ impl VirtualMessageList {
         count_messages(&self.owners.borrow())
     }
 
+    pub fn message_ids(&self) -> Vec<String> {
+        let mut ids = Vec::new();
+        for owner in self.owners.borrow().iter().flatten() {
+            if ids.last() != Some(&owner.id) {
+                ids.push(owner.id.clone());
+            }
+        }
+        ids
+    }
+
     /// First owner (oldest when `oldest`, newest otherwise) accepted by `keep`.
     pub fn edge_owner(&self, oldest: bool, keep: impl Fn(&Owner) -> bool) -> Option<Owner> {
         let owners = self.owners.borrow();

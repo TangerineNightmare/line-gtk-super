@@ -28,6 +28,7 @@ mod link_previews;
 mod login;
 mod markdown;
 mod media;
+mod media_gallery;
 mod mentions;
 mod message_copy;
 mod message_search;

@@ -347,6 +347,8 @@
   "download_folder_reset": "ใช้ Downloads",
   "download_folder_saved": "อัปเดตโฟลเดอร์ดาวน์โหลดแล้ว",
   "media_viewer_title": "มีเดีย",
+  "media_previous_file": "ไฟล์ก่อนหน้า (←)",
+  "media_next_file": "ไฟล์ถัดไป (→)",
   "media_close": "ปิด",
   "media_open_image": "เปิดรูป",
   "media_open_video": "เปิดวิดีโอ",

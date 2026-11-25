@@ -903,6 +903,20 @@ pub(super) fn handle_event(state: &AppState, ev: ProtocolEvent) {
                 }
                 return;
             }
+            if let Some(Pending::PreviewDownload {
+                gallery,
+                index,
+                chat_message,
+            }) = pending
+            {
+                if let Some(message_id) = chat_message {
+                    clear_message_download_percent(state, &message_id);
+                }
+                if let Some(gallery) = gallery.upgrade() {
+                    gallery.download_finished(state, index, ok, &result);
+                }
+                return;
+            }
             if let Some(Pending::MessageSearch { ui, generation }) = pending {
                 if let Some(ui) = ui.upgrade() {
                     message_search::response(state, &ui, generation, ok, &result);
@@ -1133,14 +1147,7 @@ pub(super) fn handle_event(state: &AppState, ev: ProtocolEvent) {
                     end_download_progress(state);
                     clear_message_download_percent(state, &message_id);
                     if let Some(path) = result.get("path").and_then(|v| v.as_str()) {
-                        if let Some(meta) = state.media_msgs.borrow_mut().get_mut(&message_id) {
-                            meta.file_path = Some(path.to_string());
-                            if content_type.eq_ignore_ascii_case("image") {
-                                meta.image_path = Some(path.to_string());
-                            } else if content_type.eq_ignore_ascii_case("audio") {
-                                meta.audio_path = Some(path.to_string());
-                            }
-                        }
+                        remember_media_download(state, &message_id, path, &content_type);
                         finish_media_action(state, &action, path, &suggest_name, &content_type);
                     } else {
                         toast(state, &crate::i18n::t("media_download_failed"));
@@ -1153,6 +1160,7 @@ pub(super) fn handle_event(state: &AppState, ev: ProtocolEvent) {
                     | Pending::ConversationSettings { .. }
                     | Pending::Album { .. }
                     | Pending::SharedMedia { .. }
+                    | Pending::PreviewDownload { .. }
                     | Pending::MessageSearch { .. }
                     | Pending::SharedMessageContext { .. }
                     | Pending::Unsend { .. }

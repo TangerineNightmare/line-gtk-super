@@ -347,6 +347,8 @@
   "download_folder_reset": "Dùng thư mục Tải xuống",
   "download_folder_saved": "Đã cập nhật thư mục tải xuống",
   "media_viewer_title": "Nội dung đa phương tiện",
+  "media_previous_file": "Tệp trước (←)",
+  "media_next_file": "Tệp tiếp theo (→)",
   "media_close": "Đóng",
   "media_open_image": "Mở ảnh",
   "media_open_video": "Mở video",

@@ -3,7 +3,7 @@ use std::cell::Cell;
 
 type Refresh = Rc<dyn Fn(&gtk::MediaFile)>;
 
-pub(super) fn append(body: &gtk::Box, path: &str, win: &gtk::Window) {
+pub(super) fn append(body: &gtk::Box, path: &str) {
     let stream = gtk::MediaFile::new();
     let picture = gtk::Picture::builder()
         .paintable(&stream)
@@ -214,9 +214,9 @@ pub(super) fn append(body: &gtk::Box, path: &str, win: &gtk::Window) {
     });
     let external_path = path.to_string();
     external.connect_clicked(move |_| open_path_externally(&external_path));
-    // 閉じたあとに音声やデコーダーを動かし続けない。
+    // Stop playback when the video is replaced or the viewer closes.
     let s = stream.clone();
-    win.connect_unmap(move |_| {
+    body.connect_unmap(move |_| {
         s.pause();
         s.clear();
     });

@@ -161,8 +161,12 @@ pub(super) fn request_media_download(state: &AppState, msg: &MessageInfo, action
         .get(&msg.id)
         .cloned()
         .unwrap_or_else(|| msg.clone());
+    if action == "open_viewer" {
+        media_gallery::open_chat(state, chat_mid, msg);
+        return;
+    }
     // Copying must use the full-size image, never the chat thumbnail.
-    let for_viewer = matches!(action, "open_viewer" | "copy_image");
+    let for_viewer = action == "copy_image";
     if let Some(path) = local_media_path(&msg, for_viewer) {
         finish_media_action(
             state,
@@ -204,7 +208,6 @@ pub(super) fn finish_media_action(
     content_type: &str,
 ) {
     match action {
-        "open_viewer" => open_media_viewer(state, path, content_type, suggest_name),
         "show_folder" => show_in_folder(path),
         "copy_image" => copy_image_to_clipboard(state, path),
         "save_dialog" => save_media_as(state, path, suggest_name, content_type),
@@ -217,6 +220,22 @@ pub(super) fn finish_media_action(
             }
         }
         _ => save_media_as(state, path, suggest_name, content_type),
+    }
+}
+
+pub(super) fn remember_media_download(
+    state: &AppState,
+    message_id: &str,
+    path: &str,
+    content_type: &str,
+) {
+    if let Some(meta) = state.media_msgs.borrow_mut().get_mut(message_id) {
+        meta.file_path = Some(path.to_string());
+        if content_type.eq_ignore_ascii_case("image") {
+            meta.image_path = Some(path.to_string());
+        } else if content_type.eq_ignore_ascii_case("audio") {
+            meta.audio_path = Some(path.to_string());
+        }
     }
 }
 
@@ -250,6 +269,22 @@ pub(super) fn copy_media_to_dest(state: &AppState, src: &str, dest: &std::path::
 }
 
 pub(super) fn save_media_as(state: &AppState, path: &str, suggest_name: &str, content_type: &str) {
+    save_media_as_for(
+        state,
+        state.window.upcast_ref(),
+        path,
+        suggest_name,
+        content_type,
+    );
+}
+
+fn save_media_as_for(
+    state: &AppState,
+    parent: &gtk::Window,
+    path: &str,
+    suggest_name: &str,
+    content_type: &str,
+) {
     let cfg = state.config.borrow().clone();
     let dest_dir = cfg.download_dir_for(content_type);
     if let Err(e) = std::fs::create_dir_all(&dest_dir) {
@@ -281,23 +316,19 @@ pub(super) fn save_media_as(state: &AppState, path: &str, suggest_name: &str, co
     dialog.set_initial_folder(Some(&gio::File::for_path(&dest_dir)));
     let s = state.clone();
     let src = path.to_string();
-    dialog.save(
-        Some(&state.window),
-        None::<&gio::Cancellable>,
-        move |result| {
-            let Ok(file) = result else {
-                return;
-            };
-            let Some(dest) = file.path() else {
-                toast(&s, &crate::i18n::t("media_download_failed"));
-                return;
-            };
-            if let Some(parent) = dest.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            copy_media_to_dest(&s, &src, &dest);
-        },
-    );
+    dialog.save(Some(parent), None::<&gio::Cancellable>, move |result| {
+        let Ok(file) = result else {
+            return;
+        };
+        let Some(dest) = file.path() else {
+            toast(&s, &crate::i18n::t("media_download_failed"));
+            return;
+        };
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        copy_media_to_dest(&s, &src, &dest);
+    });
 }
 
 pub(super) fn wire_media_open_click(
@@ -307,15 +338,6 @@ pub(super) fn wire_media_open_click(
     _kind: &str,
 ) {
     wire_media_open_click_widget(state, pic.upcast_ref::<gtk::Widget>(), msg);
-}
-
-pub(super) fn open_media_viewer(
-    state: &AppState,
-    path: &str,
-    content_type: &str,
-    suggest_name: &str,
-) {
-    open_media_viewer_for(state, &state.window, path, content_type, suggest_name, None);
 }
 
 type ViewerSaveAction = Rc<dyn Fn(&gtk::Window)>;
@@ -329,144 +351,185 @@ pub(super) fn open_media_viewer_for(
     on_save: Option<ViewerSaveAction>,
 ) {
     let kind = viewer_kind_for(content_type, path, suggest_name);
-    let (def_w, def_h) = match kind {
-        ViewerKind::Video => (1100, 720),
-        ViewerKind::Image => (1080, 760),
-        ViewerKind::Pdf | ViewerKind::Text | ViewerKind::Markdown => (920, 700),
-        _ => (720, 480),
-    };
+    let (win, viewer) = MediaViewer::new(parent, kind, None);
+    viewer.show_item(state, path, content_type, suggest_name, on_save);
+    win.present();
+}
 
-    let win = gtk::Window::builder()
-        .transient_for(parent)
-        .destroy_with_parent(true)
-        .modal(true)
-        .title(crate::i18n::t("media_viewer_title"))
-        .default_width(def_w)
-        .default_height(def_h)
-        .css_classes(["line-media-viewer"])
-        .build();
+pub(super) struct MediaViewer {
+    pub window: glib::WeakRef<gtk::Window>,
+    root: gtk::Box,
+    bar: gtk::Box,
+    title: gtk::Label,
+    actions: gtk::Box,
+}
 
-    let root = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(0)
-        .css_classes(["line-media-viewer-root"])
-        .build();
-    if matches!(kind, ViewerKind::Image | ViewerKind::Video) {
-        root.add_css_class("line-media-viewer-visual");
-    }
-
-    let bar = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(6)
-        .css_classes(["line-media-viewer-bar"])
-        .build();
-    let title = gtk::Label::builder()
-        .label(suggest_name)
-        .hexpand(true)
-        .xalign(0.0)
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .width_chars(8)
-        .max_width_chars(28)
-        .tooltip_text(suggest_name)
-        .css_classes(["heading"])
-        .build();
-
-    let open_ext = gtk::Button::builder()
-        .icon_name("document-open-symbolic")
-        .tooltip_text(crate::i18n::t("media_open_externally"))
-        .css_classes(["flat", "circular"])
-        .build();
-    let dl = gtk::Button::builder()
-        .tooltip_text(crate::i18n::t("media_download"))
-        .css_classes(["suggested-action"])
-        .build();
-    let save_content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    save_content.append(&gtk::Image::from_icon_name("folder-download-symbolic"));
-    save_content.append(&gtk::Label::new(Some(&crate::i18n::t("media_download"))));
-    dl.set_child(Some(&save_content));
-    let close = gtk::Button::builder()
-        .icon_name("window-close-symbolic")
-        .tooltip_text(crate::i18n::t("media_close"))
-        .css_classes(["flat", "circular"])
-        .build();
-    bar.append(&title);
-
-    let body = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .hexpand(true)
-        .vexpand(true)
-        .halign(gtk::Align::Fill)
-        .valign(gtk::Align::Fill)
-        .css_classes(["line-media-viewer-body"])
-        .build();
-
-    match kind {
-        ViewerKind::Video => {
-            super::video::append(&body, path, &win);
+impl MediaViewer {
+    pub fn new(
+        parent: &impl IsA<gtk::Window>,
+        kind: ViewerKind,
+        navigation: Option<&gtk::Box>,
+    ) -> (gtk::Window, Self) {
+        let (def_w, def_h) = match kind {
+            ViewerKind::Video => (1100, 720),
+            ViewerKind::Image => (1080, 760),
+            ViewerKind::Pdf | ViewerKind::Text | ViewerKind::Markdown => (920, 700),
+            _ => (720, 480),
+        };
+        let win = gtk::Window::builder()
+            .transient_for(parent)
+            .destroy_with_parent(true)
+            .modal(true)
+            .title(crate::i18n::t("media_viewer_title"))
+            .default_width(def_w)
+            .default_height(def_h)
+            .css_classes(["line-media-viewer"])
+            .build();
+        let root = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .css_classes(["line-media-viewer-root"])
+            .build();
+        let bar = gtk::Box::builder()
+            .spacing(6)
+            .css_classes(["line-media-viewer-bar"])
+            .build();
+        let title = gtk::Label::builder()
+            .hexpand(true)
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .width_chars(8)
+            .max_width_chars(28)
+            .css_classes(["heading"])
+            .build();
+        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let close = gtk::Button::builder()
+            .icon_name("window-close-symbolic")
+            .tooltip_text(crate::i18n::t("media_close"))
+            .css_classes(["flat", "circular"])
+            .build();
+        if let Some(navigation) = navigation {
+            bar.append(navigation);
         }
-        ViewerKind::Image => {
-            append_image_viewer(state, &bar, &body, path, &win);
-        }
-        ViewerKind::Pdf => {
-            append_pdf_viewer(&body, path, suggest_name);
-        }
-        ViewerKind::Text => {
-            append_text_viewer(&body, path);
-        }
-        ViewerKind::Markdown => {
-            super::markdown::append(&body, path);
-        }
-        ViewerKind::Audio => {
-            append_audio_viewer(state, &body, path);
-        }
-        ViewerKind::Generic => {
-            append_generic_file_viewer(&body, path, suggest_name);
-        }
-    }
+        bar.append(&title);
+        bar.append(&actions);
+        bar.append(&close);
+        root.append(&bar);
+        win.set_child(Some(&root));
 
-    bar.append(&open_ext);
-    bar.append(&dl);
-    bar.append(&close);
-    root.append(&bar);
-    root.append(&body);
-    win.set_child(Some(&root));
-
-    {
-        let w = win.clone();
-        close.connect_clicked(move |_| w.close());
-    }
-    {
-        let path = path.to_string();
-        open_ext.connect_clicked(move |_| {
-            open_path_externally(&path);
+        let window = win.downgrade();
+        let weak = window.clone();
+        close.connect_clicked(move |_| {
+            if let Some(win) = weak.upgrade() {
+                win.close();
+            }
         });
+        let controller = gtk::EventControllerKey::new();
+        let weak = window.clone();
+        controller.connect_key_pressed(move |_, key, _, _| {
+            if key == gdk::Key::Escape
+                && let Some(win) = weak.upgrade()
+            {
+                win.close();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        win.add_controller(controller);
+        (
+            win,
+            Self {
+                window,
+                root,
+                bar,
+                title,
+                actions,
+            },
+        )
     }
-    {
+
+    fn replace_body(&self, name: &str, kind: ViewerKind) -> gtk::Box {
+        if let Some(child) = self.bar.next_sibling() {
+            self.root.remove(&child);
+        }
+        while let Some(child) = self.actions.first_child() {
+            self.actions.remove(&child);
+        }
+        self.title.set_text(name);
+        self.title.set_tooltip_text(Some(name));
+        if matches!(kind, ViewerKind::Image | ViewerKind::Video) {
+            self.root.add_css_class("line-media-viewer-visual");
+        } else {
+            self.root.remove_css_class("line-media-viewer-visual");
+        }
+        let body = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .hexpand(true)
+            .vexpand(true)
+            .css_classes(["line-media-viewer-body"])
+            .build();
+        self.root.append(&body);
+        body
+    }
+
+    pub fn show_status(&self, name: &str, kind: ViewerKind, status: &gtk::Box) {
+        self.replace_body(name, kind).append(status);
+    }
+
+    pub fn show_item(
+        &self,
+        state: &AppState,
+        path: &str,
+        content_type: &str,
+        name: &str,
+        on_save: Option<ViewerSaveAction>,
+    ) {
+        let Some(win) = self.window.upgrade() else {
+            return;
+        };
+        let kind = viewer_kind_for(content_type, path, name);
+        let body = self.replace_body(name, kind);
+        match kind {
+            ViewerKind::Video => super::video::append(&body, path),
+            ViewerKind::Image => append_image_viewer(state, &self.actions, &body, path, &win),
+            ViewerKind::Pdf => append_pdf_viewer(&body, path, name),
+            ViewerKind::Text => append_text_viewer(&body, path),
+            ViewerKind::Markdown => super::markdown::append(&body, path),
+            ViewerKind::Audio => append_audio_viewer(state, &body, path),
+            ViewerKind::Generic => append_generic_file_viewer(&body, path, name),
+        }
+
+        let open_ext = gtk::Button::builder()
+            .icon_name("document-open-symbolic")
+            .tooltip_text(crate::i18n::t("media_open_externally"))
+            .css_classes(["flat", "circular"])
+            .build();
+        let dl = gtk::Button::builder()
+            .tooltip_text(crate::i18n::t("media_download"))
+            .css_classes(["suggested-action"])
+            .build();
+        let save_content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        save_content.append(&gtk::Image::from_icon_name("folder-download-symbolic"));
+        save_content.append(&gtk::Label::new(Some(&crate::i18n::t("media_download"))));
+        dl.set_child(Some(&save_content));
+        self.actions.append(&open_ext);
+        self.actions.append(&dl);
+        let external_path = path.to_string();
+        open_ext.connect_clicked(move |_| open_path_externally(&external_path));
         let s = state.clone();
         let path = path.to_string();
-        let name = suggest_name.to_string();
+        let name = name.to_string();
         let ct = content_type.to_string();
-        let parent = win.clone();
+        let weak = self.window.clone();
         dl.connect_clicked(move |_| {
-            if let Some(save) = &on_save {
-                save(&parent);
-            } else {
-                save_media_as(&s, &path, &name, &ct);
+            if let Some(parent) = weak.upgrade() {
+                if let Some(save) = &on_save {
+                    save(&parent);
+                } else {
+                    save_media_as_for(&s, &parent, &path, &name, &ct);
+                }
             }
         });
     }
-
-    let controller = gtk::EventControllerKey::new();
-    let w = win.clone();
-    controller.connect_key_pressed(move |_, key, _, _| {
-        if key == gtk::gdk::Key::Escape {
-            w.close();
-            return glib::Propagation::Stop;
-        }
-        glib::Propagation::Proceed
-    });
-    win.add_controller(controller);
-    win.present();
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -873,9 +936,12 @@ pub(super) fn append_image_viewer(
     let fit_to_area = {
         let zoom = zoom.clone();
         let offset = offset.clone();
-        let area = area.clone();
-        let zoom_reset = zoom_reset.clone();
+        let area = area.downgrade();
+        let zoom_reset = zoom_reset.downgrade();
         Rc::new(move || {
+            let (Some(area), Some(zoom_reset)) = (area.upgrade(), zoom_reset.upgrade()) else {
+                return;
+            };
             let aw = area.width().max(1) as f64;
             let ah = area.height().max(1) as f64;
             let z = (aw / nat_w as f64).min(ah / nat_h as f64).clamp(0.05, 1.0);
@@ -889,11 +955,14 @@ pub(super) fn append_image_viewer(
     let zoom_at = {
         let zoom = zoom.clone();
         let offset = offset.clone();
-        let area = area.clone();
+        let area = area.downgrade();
         let fast_paint = fast_paint.clone();
         let fit_mode = fit_mode.clone();
         let zoom_reset = zoom_reset.clone();
         Rc::new(move |factor: f64, pivot_x: f64, pivot_y: f64, fast: bool| {
+            let Some(area) = area.upgrade() else {
+                return;
+            };
             let old = (*zoom.borrow()).max(0.01);
             let new_z = (old * factor).clamp(0.05, 16.0);
             if (new_z - old).abs() < f64::EPSILON {
@@ -959,13 +1028,17 @@ pub(super) fn append_image_viewer(
     }
 
     let refresh_edit_btns = {
-        let undo_btn = undo_btn.clone();
-        let clear_btn = clear_btn.clone();
+        let undo_btn = undo_btn.downgrade();
+        let clear_btn = clear_btn.downgrade();
         let strokes = strokes.clone();
         Rc::new(move || {
-            let n = strokes.borrow().len();
-            undo_btn.set_sensitive(n > 0);
-            clear_btn.set_sensitive(n > 0);
+            let has_strokes = !strokes.borrow().is_empty();
+            for button in [undo_btn.upgrade(), clear_btn.upgrade()]
+                .into_iter()
+                .flatten()
+            {
+                button.set_sensitive(has_strokes);
+            }
         })
     };
 
@@ -1002,7 +1075,7 @@ pub(super) fn append_image_viewer(
     }
     {
         let s = state.clone();
-        let win = win.clone();
+        let win = win.downgrade();
         let pixbuf = pixbuf.clone();
         let strokes = strokes.clone();
         let src_path = path.to_string();
@@ -1026,7 +1099,9 @@ pub(super) fn append_image_viewer(
                     }
                 }
             };
-            if send_local_image_file(&s, &out) {
+            if send_local_image_file(&s, &out)
+                && let Some(win) = win.upgrade()
+            {
                 win.close();
             }
         });
@@ -1039,10 +1114,12 @@ pub(super) fn append_image_viewer(
     {
         let zoom_at = zoom_at.clone();
         let offset = offset.clone();
-        let area = area.clone();
         let fast_paint = fast_paint.clone();
         let fit_mode = fit_mode.clone();
         scroll_ctl.connect_scroll(move |ctl, dx, dy| {
+            let Some(area) = ctl.widget() else {
+                return glib::Propagation::Proceed;
+            };
             let state = ctl.current_event_state();
             if state.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
                 let px = area.width() as f64 * 0.5;
@@ -1056,7 +1133,6 @@ pub(super) fn append_image_viewer(
                 };
                 zoom_at(factor, px, py, true);
                 let fast_paint = fast_paint.clone();
-                let area = area.clone();
                 glib::timeout_add_local_once(std::time::Duration::from_millis(120), move || {
                     *fast_paint.borrow_mut() = false;
                     area.queue_draw();
@@ -1086,10 +1162,12 @@ pub(super) fn append_image_viewer(
         let brush_color = brush_color.clone();
         let brush_width = brush_width.clone();
         let zoom = zoom.clone();
-        let area = area.clone();
         let fast_paint = fast_paint.clone();
         let fit_mode = fit_mode.clone();
         drag.connect_drag_begin(move |gesture, x, y| {
+            let Some(area) = gesture.widget() else {
+                return;
+            };
             if *draw_mode.borrow() {
                 let z = (*zoom.borrow()).max(0.01);
                 let (ox, oy) = *offset.borrow();
@@ -1116,8 +1194,10 @@ pub(super) fn append_image_viewer(
         let offset = offset.clone();
         let active_stroke = active_stroke.clone();
         let zoom = zoom.clone();
-        let area = area.clone();
         drag.connect_drag_update(move |gesture, _x, _y| {
+            let Some(area) = gesture.widget() else {
+                return;
+            };
             let Some((dx, dy)) = gesture.offset() else {
                 return;
             };
@@ -1142,10 +1222,12 @@ pub(super) fn append_image_viewer(
         let draw_mode = draw_mode.clone();
         let active_stroke = active_stroke.clone();
         let strokes = strokes.clone();
-        let area = area.clone();
         let refresh = refresh_edit_btns.clone();
         let fast_paint = fast_paint.clone();
-        drag.connect_drag_end(move |_, _x, _y| {
+        drag.connect_drag_end(move |gesture, _x, _y| {
+            let Some(area) = gesture.widget() else {
+                return;
+            };
             if *draw_mode.borrow() {
                 if let Some(stroke) = active_stroke.borrow_mut().take()
                     && !stroke.points.is_empty()

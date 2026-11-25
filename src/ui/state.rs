@@ -336,6 +336,11 @@ pub(super) enum Pending {
         mention_draft: Option<super::mentions::MentionDraft>,
     },
     StickerLibrary(Rc<super::sticker_library::Request>),
+    PreviewDownload {
+        gallery: std::rc::Weak<super::media_gallery::Gallery>,
+        index: usize,
+        chat_message: Option<String>,
+    },
     DownloadMedia {
         message_id: String,
         action: String,

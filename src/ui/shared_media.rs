@@ -13,8 +13,7 @@ pub(super) enum SharedMediaRequest {
         reset_scroll: bool,
     },
     Download {
-        item: Box<SharedMediaItem>,
-        save: bool,
+        message_id: String,
     },
 }
 
@@ -61,7 +60,7 @@ pub(super) struct SharedMediaUi {
     generation: Cell<u64>,
     busy: Cell<bool>,
     closed: Cell<bool>,
-    downloads: RefCell<HashSet<(String, bool)>>,
+    downloads: RefCell<HashSet<String>>,
 }
 
 pub(super) fn open(state: &AppState) {
@@ -418,11 +417,9 @@ pub(super) fn response(
                 update_navigation(ui);
             }
         }
-        SharedMediaRequest::Download { item, save } => {
-            ui.downloads
-                .borrow_mut()
-                .remove(&(item.message_id.clone(), save));
-            if is_unsent(state, ui, &item.message_id) {
+        SharedMediaRequest::Download { message_id } => {
+            ui.downloads.borrow_mut().remove(&message_id);
+            if is_unsent(state, ui, &message_id) {
                 return;
             }
             let downloaded = ok
@@ -431,23 +428,12 @@ pub(super) fn response(
             if let Some(downloaded) =
                 downloaded.filter(|download| std::path::Path::new(&download.path).is_file())
             {
-                if save {
-                    save_media_as(
-                        state,
-                        &downloaded.path,
-                        &downloaded.file_name,
-                        &downloaded.content_type,
-                    );
-                } else {
-                    open_media_viewer_for(
-                        state,
-                        &ui.window,
-                        &downloaded.path,
-                        &downloaded.content_type,
-                        &downloaded.file_name,
-                        None,
-                    );
-                }
+                save_media_as(
+                    state,
+                    &downloaded.path,
+                    &downloaded.file_name,
+                    &downloaded.content_type,
+                );
             } else {
                 ui.toast.add_toast(libadwaita::Toast::new(&crate::i18n::t(
                     "shared_media_original_failed",
@@ -782,11 +768,20 @@ fn activate(state: &AppState, ui: &Rc<SharedMediaUi>, item: &SharedMediaItem, sa
         open_uri(url);
         return;
     }
-    if !ui
-        .downloads
-        .borrow_mut()
-        .insert((item.message_id.clone(), save))
-    {
+    if !save {
+        let pages = ui.pages.borrow();
+        if let Some(page) = &pages[ui.category.get()].result {
+            media_gallery::open_shared(
+                state,
+                &ui.window,
+                &ui.chat_mid,
+                &page.items,
+                &item.message_id,
+            );
+        }
+        return;
+    }
+    if !ui.downloads.borrow_mut().insert(item.message_id.clone()) {
         return;
     }
     let sent = state
@@ -796,8 +791,7 @@ fn activate(state: &AppState, ui: &Rc<SharedMediaUi>, item: &SharedMediaItem, sa
         state,
         ui,
         SharedMediaRequest::Download {
-            item: Box::new(item.clone()),
-            save,
+            message_id: item.message_id.clone(),
         },
         sent,
     );
@@ -814,7 +808,7 @@ fn icon_button(icon: &str, key: &str) -> gtk::Button {
     button
 }
 
-fn item_name(item: &SharedMediaItem) -> String {
+pub(super) fn item_name(item: &SharedMediaItem) -> String {
     if let Some(url) = &item.url {
         return url
             .split_once("://")

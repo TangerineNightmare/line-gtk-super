@@ -346,6 +346,8 @@
   "download_folder_reset": "ダウンロードフォルダーを使用",
   "download_folder_saved": "保存先を変更しました",
   "media_viewer_title": "メディア",
+  "media_previous_file": "前のファイル (←)",
+  "media_next_file": "次のファイル (→)",
   "media_close": "閉じる",
   "media_open_image": "画像を開く",
   "media_open_video": "動画を開く",

@@ -347,6 +347,8 @@
   "download_folder_reset": "Use Downloads",
   "download_folder_saved": "Download folder updated",
   "media_viewer_title": "Media",
+  "media_previous_file": "Previous file (←)",
+  "media_next_file": "Next file (→)",
   "media_close": "Close",
   "media_open_image": "Open image",
   "media_open_video": "Open video",
