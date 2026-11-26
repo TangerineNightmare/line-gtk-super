@@ -80,8 +80,8 @@ pub(super) fn append(bubble: &gtk::Box, text: &str) {
             .css_classes(["line-link-preview-actions"])
             .build();
         let load = gtk::Button::builder()
-            .label(crate::i18n::t("link_preview_retry"))
-            .visible(false)
+            .label(crate::i18n::t("link_preview_load"))
+            .visible(true)
             .css_classes(["flat"])
             .build();
         let open = gtk::LinkButton::builder()
@@ -155,16 +155,8 @@ pub(super) fn append(bubble: &gtk::Box, text: &str) {
                 }
             });
         });
-        // Mapping happens when the message enters the widget tree. Start only once,
-        // including when GTK remaps the card after scrolling or switching tabs.
-        let started = std::cell::Cell::new(false);
-        let load_c = load.clone();
-        card.connect_map(move |_| {
-            if !started.replace(true) {
-                description.set_text(&crate::i18n::t("link_preview_loading"));
-                load_c.emit_clicked();
-            }
-        });
+        // Previews load only when the user presses the button: showing a message
+        // must not contact a third-party host on the sender's behalf.
     }
 }
 
