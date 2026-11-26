@@ -2087,7 +2087,12 @@ fn toast(state: &AppState, msg: &str) {
         eprintln!("[soft] {msg}");
         return;
     }
-    state.toast_overlay.add_toast(libadwaita::Toast::new(msg));
+    // AdwToast titles are Pango markup: escape so error bodies such as "<>"
+    // are shown instead of rejected, and keep a copy in the log file.
+    tracing::warn!(target: "line_gtk::toast", "{msg}");
+    state
+        .toast_overlay
+        .add_toast(libadwaita::Toast::new(&glib::markup_escape_text(msg)));
 }
 
 fn peer_display_name(state: &AppState, mid: &str) -> String {

@@ -93,6 +93,9 @@ import {
   type SharedMediaSource,
 } from "./shared_media.ts";
 import { createSharedAttachmentCache } from "./shared_media_cache.ts";
+import { installHttpTrace } from "./http_trace.ts";
+
+installHttpTrace();
 
 type Json = Record<string, unknown>;
 
