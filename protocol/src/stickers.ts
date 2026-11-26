@@ -227,7 +227,7 @@ export function createStickerService(runtime: StickerRuntime) {
         title?: Record<string, string> | string;
         version?: number | string;
       };
-      const lang = (Deno.env.get("LINE_GTK_LANG") || "th").toLowerCase();
+      const lang = (Deno.env.get("LINE_GTK_LANG") || "en").toLowerCase();
       const preferEn = lang === "en" || lang === "eng";
       const preferJa = lang === "ja" || lang === "ja-jp" || lang === "ja_jp";
       let name = pkg.name || pkg.id;

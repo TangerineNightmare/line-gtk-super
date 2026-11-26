@@ -49,7 +49,7 @@ export function createMessageView(runtime: MessageViewRuntime) {
   }
 
   function previewLang() {
-    const code = (Deno.env.get("LINE_GTK_LANG") || "vi").toLowerCase();
+    const code = (Deno.env.get("LINE_GTK_LANG") || "en").toLowerCase();
     if (code === "vi" || code === "vie" || code === "vietnamese") {
       return {
         you: "Bạn",

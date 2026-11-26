@@ -118,9 +118,9 @@ impl Default for AppConfig {
         Self {
             startup_auto_login: false,
             theme: "system".into(),
-            language: "vi".into(),
+            language: "en".into(),
             font_scale: 1.0,
-            font_family: default_font_family("vi").into(),
+            font_family: default_font_family("en").into(),
             animations: true,
             cache_retention: "smart".into(),
             message_cache_limit: DEFAULT_MESSAGE_CACHE_LIMIT,
@@ -406,7 +406,7 @@ impl AppConfig {
             self.theme = "system".into();
         }
         if !matches!(self.language.as_str(), "vi" | "en" | "th" | "ja") {
-            self.language = "vi".into();
+            self.language = "en".into();
         }
         // Older versions used the Thai default for Vietnamese and English too.
         if self.font_family == legacy_font_family() {
@@ -631,7 +631,7 @@ mod tests {
         };
         cfg.normalize();
         assert_eq!(cfg.theme, "system");
-        assert_eq!(cfg.language, "vi");
+        assert_eq!(cfg.language, "en");
         assert_eq!(cfg.cache_retention, "smart");
         assert_eq!(cfg.font_scale, 1.0);
         assert_eq!(cfg.notification_sound_volume, 2.0);
