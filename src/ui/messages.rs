@@ -563,6 +563,7 @@ fn append_message_rows(state: &AppState, msg: &MessageInfo, live: bool) {
         if show_text && !msg.emojis.is_empty() {
             emojis::append(state, &bubble, msg);
             link_previews::append(&bubble, &msg.text);
+            translate::attach(state, &bubble, msg);
         } else if show_text {
             // Selectable text keeps the browser-style link styling while
             // allowing drag-to-select and Ctrl+C directly in the bubble.
@@ -584,6 +585,7 @@ fn append_message_rows(state: &AppState, msg: &MessageInfo, live: bool) {
             mentions::wire_label_click(state, &label, &msg.text, &msg.mentions, &links);
             bubble.append(&label);
             link_previews::append(&bubble, &msg.text);
+            translate::attach(state, &bubble, msg);
         } else if !has_image && !waiting_visual {
             let fallback = if msg.content_type.is_empty() {
                 "(message)".to_string()

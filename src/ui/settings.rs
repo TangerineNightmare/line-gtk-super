@@ -617,6 +617,7 @@ pub fn open_settings(parent: &impl IsA<gtk::Window>, deps: SettingsDeps) {
     audio_grp.add(&output_row);
 
     features.add(&chat_grp);
+    features.add(&translation_group(&deps));
     features.add(&audio_grp);
 
     // ---- Experimental (voice calls) ----
@@ -1187,4 +1188,101 @@ pub fn open_settings(parent: &impl IsA<gtk::Window>, deps: SettingsDeps) {
     win.add(&account);
 
     win.present();
+}
+
+/// Server and languages for message translation (LibreTranslate-compatible API).
+fn translation_group(deps: &SettingsDeps) -> libadwaita::PreferencesGroup {
+    let group = libadwaita::PreferencesGroup::builder()
+        .title(i18n::t("translate_settings"))
+        .description(i18n::t("translate_settings_desc"))
+        .build();
+    let (url, key, mine, partner) = {
+        let c = deps.config.borrow();
+        (
+            c.translate_url.clone(),
+            c.translate_api_key.clone(),
+            c.translate_language.clone(),
+            c.translate_partner_language.clone(),
+        )
+    };
+    let url_row = libadwaita::EntryRow::builder()
+        .title(i18n::t("translate_url"))
+        .text(&url)
+        .show_apply_button(true)
+        .build();
+    let key_row = libadwaita::PasswordEntryRow::builder()
+        .title(i18n::t("translate_api_key"))
+        .text(&key)
+        .show_apply_button(true)
+        .build();
+    let mine_row = libadwaita::EntryRow::builder()
+        .title(i18n::t("translate_language"))
+        .text(&mine)
+        .show_apply_button(true)
+        .build();
+    let partner_row = libadwaita::EntryRow::builder()
+        .title(i18n::t("translate_partner_language"))
+        .text(&partner)
+        .show_apply_button(true)
+        .build();
+
+    type Setter = fn(&mut AppConfig, String);
+    let fields: [(&libadwaita::EntryRow, Setter); 4] = [
+        (&url_row, |c, v| c.translate_url = v),
+        (key_row.upcast_ref(), |c, v| c.translate_api_key = v),
+        (&mine_row, |c, v| c.translate_language = v),
+        (&partner_row, |c, v| c.translate_partner_language = v),
+    ];
+    for (row, set) in fields {
+        let cfg = deps.config.clone();
+        let data_dir = deps.data_dir.clone();
+        let toast = deps.toast.clone();
+        let url_row = url_row.clone();
+        let mine_row = mine_row.clone();
+        let partner_row = partner_row.clone();
+        row.connect_apply(move |row| {
+            set(&mut cfg.borrow_mut(), row.text().to_string());
+            cfg.borrow_mut().normalize_translation();
+            cfg.borrow().save(&data_dir);
+            // Show the normalised values (trimmed URL, lower-case codes).
+            let c = cfg.borrow();
+            url_row.set_text(&c.translate_url);
+            mine_row.set_text(&c.translate_language);
+            partner_row.set_text(&c.translate_partner_language);
+            super::translate::clear();
+            toast(&i18n::t("translate_saved"));
+        });
+    }
+
+    let test_row = libadwaita::ActionRow::builder()
+        .title(i18n::t("translate_test"))
+        .build();
+    let test = gtk::Button::builder()
+        .label(i18n::t("translate_test"))
+        .valign(gtk::Align::Center)
+        .build();
+    {
+        let cfg = deps.config.clone();
+        let toast = deps.toast.clone();
+        test.connect_clicked(move |button| {
+            button.set_sensitive(false);
+            let button = button.clone();
+            let toast = toast.clone();
+            super::translate::test_server(&cfg.borrow(), move |result| {
+                button.set_sensitive(true);
+                toast(&match result {
+                    Ok(text) => i18n::tf("translate_test_ok", &[("text", &text)]),
+                    Err(error) => i18n::tf("translate_failed", &[("error", &error)]),
+                });
+            });
+        });
+    }
+    test_row.add_suffix(&test);
+
+    group.add(&url_row);
+    group.add(&key_row);
+    group.add(&mine_row);
+    group.add(&partner_row);
+    group.add(&test_row);
+    group
 }

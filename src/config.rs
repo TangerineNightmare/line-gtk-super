@@ -20,6 +20,10 @@ fn legacy_font_family() -> String {
     "Noto Sans Thai".into()
 }
 
+/// A LibreTranslate container on this machine, e.g.
+/// `podman run -p 127.0.0.1:5000:5000 libretranslate/libretranslate`.
+pub const DEFAULT_TRANSLATE_URL: &str = "http://127.0.0.1:5000";
+
 pub const DEFAULT_MESSAGE_CACHE_LIMIT: u32 = 2000;
 const MAX_MESSAGE_CACHE_LIMIT: u32 = 1_000_000;
 /// Choices offered in Settings; 0 means unlimited.
@@ -111,6 +115,17 @@ pub struct AppConfig {
     pub download_dir_video: String,
     pub download_dir_audio: String,
     pub download_dir_file: String,
+    /// LibreTranslate-compatible server (POST {url}/translate).
+    pub translate_url: String,
+    /// Optional api_key sent with each translation request.
+    pub translate_api_key: String,
+    /// Language translations are shown in (ISO 639-1, e.g. "en").
+    pub translate_language: String,
+    /// The other language of the pair; messages already in `translate_language`
+    /// are translated into this one on request (e.g. "th").
+    pub translate_partner_language: String,
+    /// Chats whose incoming messages are translated automatically, per account.
+    pub auto_translate_chats: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl Default for AppConfig {
@@ -155,6 +170,11 @@ impl Default for AppConfig {
             download_dir_video: String::new(),
             download_dir_audio: String::new(),
             download_dir_file: String::new(),
+            translate_url: DEFAULT_TRANSLATE_URL.into(),
+            translate_api_key: String::new(),
+            translate_language: "en".into(),
+            translate_partner_language: "th".into(),
+            auto_translate_chats: BTreeMap::new(),
         }
     }
 }
@@ -231,6 +251,44 @@ impl AppConfig {
         }
         if let Err(error) = self.save_atomic(data_dir) {
             self.pinned_chats = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub fn is_chat_auto_translated(&self, account: &str, mid: &str) -> bool {
+        self.auto_translate_chats
+            .get(account)
+            .is_some_and(|chats| chats.contains(mid))
+    }
+
+    pub fn set_chat_auto_translated(
+        &mut self,
+        data_dir: &Path,
+        account: &str,
+        mid: &str,
+        on: bool,
+    ) -> std::io::Result<()> {
+        if account.trim().is_empty() || mid.trim().is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "account and chat id are required",
+            ));
+        }
+        let previous = self.auto_translate_chats.clone();
+        if on {
+            self.auto_translate_chats
+                .entry(account.into())
+                .or_default()
+                .insert(mid.into());
+        } else if let Some(chats) = self.auto_translate_chats.get_mut(account) {
+            chats.remove(mid);
+            if chats.is_empty() {
+                self.auto_translate_chats.remove(account);
+            }
+        }
+        if let Err(error) = self.save_atomic(data_dir) {
+            self.auto_translate_chats = previous;
             return Err(error);
         }
         Ok(())
@@ -401,7 +459,29 @@ impl AppConfig {
         Ok(())
     }
 
+    /// Trim the server URL and keep language codes to plain ISO-style tags.
+    pub fn normalize_translation(&mut self) {
+        self.translate_url = self.translate_url.trim().trim_end_matches('/').to_string();
+        if self.translate_url.is_empty() {
+            self.translate_url = DEFAULT_TRANSLATE_URL.into();
+        }
+        for (lang, fallback) in [
+            (&mut self.translate_language, "en"),
+            (&mut self.translate_partner_language, "th"),
+        ] {
+            let code = lang.trim().to_ascii_lowercase();
+            *lang = if (2..=8).contains(&code.len())
+                && code.chars().all(|c| c.is_ascii_alphabetic() || c == '-')
+            {
+                code
+            } else {
+                fallback.into()
+            };
+        }
+    }
+
     fn normalize(&mut self) {
+        self.normalize_translation();
         if !matches!(self.theme.as_str(), "system" | "dark" | "light") {
             self.theme = "system".into();
         }

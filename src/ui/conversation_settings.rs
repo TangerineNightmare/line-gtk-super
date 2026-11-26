@@ -289,10 +289,19 @@ fn open(state: &AppState, mid: &str) {
     body.append(&group_box);
     let general = libadwaita::PreferencesGroup::new();
     let pinned = state.config.borrow().is_chat_pinned(&account, mid);
+    let auto_translated = state.config.borrow().is_chat_auto_translated(&account, mid);
     for (key, action) in [
         (
             if pinned { "unpin_chat" } else { "pin_chat" },
             "win.toggle-chat-pin",
+        ),
+        (
+            if auto_translated {
+                "auto_translate_off"
+            } else {
+                "auto_translate_on"
+            },
+            "win.toggle-chat-auto-translate",
         ),
         ("hide_chat", "win.hide-chat"),
     ] {

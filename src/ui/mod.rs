@@ -51,6 +51,7 @@ mod state;
 mod sticker_image_editor;
 mod sticker_library;
 mod sticker_preview;
+mod translate;
 mod unread_sync;
 mod unsend;
 mod user_profile;
@@ -383,6 +384,7 @@ fn build_ui(
     wire_actions(&state);
     replies::wire(&state);
     message_copy::wire(&state);
+    translate::wire(&state);
     mentions::wire(&state);
     unsend::wire(&state);
     reactions::wire(&state);

@@ -12,7 +12,7 @@ pub(super) fn image_eligible(message: &MessageInfo) -> bool {
         && message.chat_event.is_none()
 }
 
-fn text_eligible(message: &MessageInfo) -> bool {
+pub(super) fn text_eligible(message: &MessageInfo) -> bool {
     !message.text.is_empty()
         && !is_media_placeholder(&message.text)
         && !message.decryption_failed

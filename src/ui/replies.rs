@@ -228,6 +228,7 @@ pub(super) fn menu(message: &MessageInfo) -> gio::Menu {
         );
         menu.append_item(&item);
     }
+    translate::append_menu(&menu, message);
     message_copy::append_menu(&menu, message);
     menu
 }
