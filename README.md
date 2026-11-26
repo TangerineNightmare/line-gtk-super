@@ -267,7 +267,7 @@ flatpak run dev.linegtk.LineGtk
 Vietnamese and English use `Noto Sans` by default, including as fallback for custom chat and composer fonts. Install `noto-fonts` on Arch Linux. Existing Vietnamese settings using the old `Noto Sans Thai` default migrate automatically; custom fonts and an empty system-font setting are preserved. Selecting Japanese uses `Noto Sans CJK JP` with the default font; custom fonts are retained. Install `noto-fonts-cjk` on Arch Linux for Japanese.
 
 ```bash
-git clone <this repository's URL> line-gtk-super
+git clone https://github.com/TangerineNightmare/line-gtk-super.git line-gtk-super
 cd line-gtk-super
 cargo build --release
 ./scripts/build-sidecar.sh
