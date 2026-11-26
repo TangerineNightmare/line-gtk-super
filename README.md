@@ -1,10 +1,42 @@
-# Line-GTK
+# Line-GTK Super
 
 Unofficial native LINE client for Linux, with a GTK4/Libadwaita interface and a Deno protocol sidecar powered by [linejs](https://github.com/evex-dev/linejs).
 
-**README:** English · [Tiếng Việt](README.vi.md) · [日本語](README.ja.md)
+**README:** English · [Tiếng Việt](README.vi.md) · [日本語](README.ja.md) (the Vietnamese and Japanese READMEs describe upstream and don't cover the fork changes below)
 
-> The `personal/features` branch is for personal feature development and is separate from `main`, which is used for upstream pull requests. It integrates Japanese UI and font support, message decryption, group information, and email login changes.
+> **This is a fork of [MidnightTale/Line-GTK](https://github.com/MidnightTale/Line-GTK).**
+> It combines upstream with the work in
+> [pull request #12](https://github.com/MidnightTale/Line-GTK/pull/12) by WindyWin and
+> [shirafukayayoi](https://github.com/shirafukayayoi/Line-GTK) (which already includes
+> PRs #4–#11 by yuki-kanemaru), then adds a few changes of its own. The full upstream
+> history is kept, so `git log` shows who wrote what. The `upstream` remote points at the
+> original repository.
+
+## What this fork changes
+
+- **Message translation** through any server that speaks the
+  [LibreTranslate](https://github.com/LibreTranslate/LibreTranslate) HTTP API, such as
+  LibreTranslate itself or [LTEngine](https://github.com/LibreTranslate/LTEngine).
+  Right-click a message → **Translate**, or switch on **Auto-translate this chat**.
+  Thai ↔ English is the default pair, and other languages can be configured. See
+  [Message translation](#message-translation) and [docs/translation.md](docs/translation.md).
+- **English is the default UI language** (upstream PR #12 defaults to Vietnamese).
+  Thai, Vietnamese and Japanese are still available in Settings.
+- **Plain LEGY transport by default.** LINE's encrypted gateway (`gf.line.naver.jp/enc`)
+  started returning 404 in November 2026 ([linejs #280](https://github.com/evex-dev/linejs/issues/280)).
+  The client uses the plain `/S4` endpoints over HTTPS, and Letter Sealing (E2EE) still
+  applies. The `LINE_GTK_LEGY_ENCRYPTED` variable is now also honoured when running from source.
+- **Link previews load on click only**, so no third-party site sees your IP just because a
+  link appeared in a chat.
+- **Removed unused food-poll code** that was never wired into the UI but contained a
+  hard-coded address and Google Maps/Places calls.
+- **Opt-in, redacted HTTP trace** (`LINE_GTK_TRACE_HTTP=1`) for debugging login problems.
+  Toast messages are markup-escaped and copied to the log.
+- **Podman build for Ubuntu 24.04** producing a self-contained tarball:
+  [packaging/ubuntu](packaging/ubuntu/INSTALL.md).
+
+See [docs/fork-notes.md](docs/fork-notes.md) for how the upstream pull requests were
+chosen and what was checked.
 
 ![Line-GTK main window](assets/761546283_1013837091419784_4898538377611644175_n.jpg)
 
@@ -59,7 +91,8 @@ Everything checked below is implemented in the current Line-GTK feature set. The
 - [x] [Reply from notifications](docs/notification-replies.md) in a separate composer, preserving the active chat and its draft
 - [x] System tray with recent chats, unread badge, mute timers, close-to-tray, and autostart
 - [x] Resume after sleep and network recovery, reconnect retries, stalled-receiver detection, and cached chats at startup
-- [x] Discord Rich Presence, themes, font and UI scaling, animations, and Vietnamese (default), Thai, English, and Japanese UI
+- [x] Discord Rich Presence, themes, font and UI scaling, animations, and English (default), Thai, Vietnamese, and Japanese UI
+- [x] Message translation (click or per-chat automatic) through a LibreTranslate-compatible server
 - [x] Cache retention, per-chat message limits, granular cache clearing, diagnostics, and protocol-engine restart
 - [x] Experimental 1:1 voice calls behind an opt-in setting; they require QR login and may be unstable
 
@@ -83,7 +116,7 @@ These are native LINE features this client does not provide. The experimental vo
 - [ ] Group Notes/posts and group album management
 - [ ] Forwarding and sharing messages, multi-select actions, and pinning individual messages
 - [ ] Full-text search across all chats (search is per conversation and limited to saved history)
-- [ ] Per-chat backgrounds/themes, message translation, typing replies directly inside notifications, and message effects
+- [ ] Per-chat backgrounds/themes, typing replies directly inside notifications, and message effects
 - [ ] Keep, Keep Memo, and saving messages to Keep
 - [ ] Official-account rich menus, buttons, and quick replies
 
@@ -105,7 +138,7 @@ These are native LINE features this client does not provide. The experimental vo
 
 - [ ] OpenChat discovery, joining, and management
 - [ ] Timeline/VOOM, LINE Today, LINE Pay, Shopping, Games, and premium subscription features
-- [ ] AI/prototype features in the official client: chat summary/search/translation, OCR translation, natural-language sticker search, AI agent, and call backgrounds
+- [ ] AI/prototype features in the official client: chat summary/search, OCR translation, natural-language sticker search, AI agent, and call backgrounds
 
 ### Read receipts and unread state
 
@@ -155,6 +188,43 @@ Click a video thumbnail's play button for a viewer with playback, position, elap
 
 Use **Album** at the top of a chat to open its albums, or **All chats** for the full list. With no chat selected, the full list appears by default. Open a photo for a larger view and save its original from the photo or image viewer. Existing download location and dialog settings apply; normal saving does not overwrite a same-named file. Originals load 12 at a time, with up to three concurrent downloads, and are reused from the media cache. JPEG, PNG, GIF, and WebP are supported up to 50 MB per original. Album videos are marked unsupported; creating albums or adding and deleting photos is unavailable. Use **Retry** after a failed download or refresh stale album information.
 
+### Message translation
+
+Right-click a message and choose **Translate** to show its translation under the bubble.
+Choose it again to hide it. To translate a whole chat as messages arrive, open
+**Conversation settings** and switch on **Auto-translate this chat**. It only translates
+other people's messages that aren't already in your language.
+
+Configure it under **Settings → Features → Translation**:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| Server URL | `http://127.0.0.1:5000` | Base URL of a LibreTranslate-compatible server (`/translate` is appended) |
+| API key | empty | Sent as `api_key` if set |
+| Translate into | `en` | Your language |
+| Other language | `th` | Used when you click **Translate** on a message already in your language |
+
+**Test connection** sends a short request and shows the result. Thai script is detected
+locally, and everything else is sent with `source: "auto"`. Results are cached per message
+for the session.
+
+Any server that implements `POST /translate` works:
+
+```bash
+# Lightweight: LibreTranslate with only the English and Thai models
+podman run -d --name libretranslate --restart=unless-stopped \
+  -p 127.0.0.1:5000:5000 -v libretranslate-models:/home/libretranslate/.local \
+  docker.io/libretranslate/libretranslate:v1.9.6 --load-only en,th
+```
+
+For better handling of slang and mixed Thai/English, run **LTEngine** (a local LLM, Gemma 3,
+~4 GB RAM for the default model). [packaging/ltengine](packaging/ltengine/README.md) has a
+CPU container build and a systemd (Quadlet) unit. Details, the wire format, and tuning are
+in [docs/translation.md](docs/translation.md).
+
+**Privacy:** message text, including the decrypted text of end-to-end-encrypted chats, is
+sent to the configured server. Keep it on your own machine or a server you trust.
+
 ## Requirements
 
 Email login authenticates this client as an additional PC device and may require a phone verification code. Normally the app restores a session using PC credentials. Enable **Save login details and sign in automatically at startup** to save email and password in the OS keyring after successful login. You can add, change, or delete them under **Settings → Account → Automatic sign-in at startup**.
@@ -197,14 +267,21 @@ flatpak run dev.linegtk.LineGtk
 Vietnamese and English use `Noto Sans` by default, including as fallback for custom chat and composer fonts. Install `noto-fonts` on Arch Linux. Existing Vietnamese settings using the old `Noto Sans Thai` default migrate automatically; custom fonts and an empty system-font setting are preserved. Selecting Japanese uses `Noto Sans CJK JP` with the default font; custom fonts are retained. Install `noto-fonts-cjk` on Arch Linux for Japanese.
 
 ```bash
-git clone https://github.com/MidnightTale/Line-GTK.git
-cd Line-GTK
+git clone <this repository's URL> line-gtk-super
+cd line-gtk-super
 cargo build --release
 ./scripts/build-sidecar.sh
 LINE_GTK_ROOT="$PWD" ./target/release/line-gtk
 ```
 
 Builds automatically download checksum-pinned libraries, including linejs, from GitHub into the ignored `protocol/vendor/deps` directory. Builds do not contact JSR. Version pins, the source manifest, and `protocol/deno.lock` remain committed. The first build needs GitHub, the npm registry, and the Deno compiler runtime. Once cached, use `DENO_OFFLINE=1 ./scripts/build-sidecar.sh` to prevent dependency downloads. See the [dependency and connection recovery notes](docs/protocol-reliability.md).
+
+To build a self-contained Ubuntu 24.04 tarball in podman without installing the
+toolchain on the host, run `./packaging/ubuntu/build.sh`. See
+[packaging/ubuntu/INSTALL.md](packaging/ubuntu/INSTALL.md).
+
+Note: the Arch/AUR and Flatpak instructions above describe upstream Line-GTK packages,
+not this fork.
 
 ## Development checks
 
@@ -220,7 +297,7 @@ deno task --config protocol/deno.json check
 See the [upstream change list](docs/upstream-changes.md) for added features,
 protocol and packaging impacts, validation results, and remaining limitations.
 
-This branch integrates documented changes from [shirafukayayoi/Line-GTK](https://github.com/shirafukayayoi/Line-GTK) through `personal/features` commit `0907007`, while keeping Vietnamese as the app's default language. See the [Vietnamese integration notes](docs/fork-shirafukayayoi.md) for features and limits.
+This branch integrates documented changes from [shirafukayayoi/Line-GTK](https://github.com/shirafukayayoi/Line-GTK) through `personal/features` commit `0907007`, while keeping Vietnamese as the app's default language. This fork then changed the default to English. See the [Vietnamese integration notes](docs/fork-shirafukayayoi.md) for features and limits.
 
 ## Message decryption and group information
 
@@ -231,6 +308,10 @@ Line-GTK uses linejs 3.5.0 to address message bodies appearing as `(none)`. If a
 This is an unofficial client. Using it may violate LINE's Terms of Service. Prefer a secondary account or device session. LINE login or encryption changes may break the client.
 
 ## Acknowledgments
+
+Line-GTK was created by [MidnightTale](https://github.com/MidnightTale/Line-GTK). Most of
+the features in this fork come from WindyWin, [shirafukayayoi](https://github.com/shirafukayayoi)
+and yuki-kanemaru through upstream pull requests #4–#12.
 
 Protocol and end-to-end encryption access LINE through [linejs](https://github.com/evex-dev/linejs) by [evex-dev](https://github.com/evex-dev). This app is a GTK frontend around that library and is not affiliated with LINE Corporation or evex-dev.
 

@@ -1,0 +1,29 @@
+# Podman Quadlet unit for LTEngine, a LibreTranslate-compatible LLM translation server.
+# Install:
+#   cp ltengine.container ~/.config/containers/systemd/
+#   systemctl --user daemon-reload && systemctl --user start ltengine
+#   loginctl enable-linger "$USER"     # optional: start at boot without logging in
+# Then set Line-GTK Settings -> Features -> Translation -> Server URL to http://127.0.0.1:5000
+[Unit]
+Description=LTEngine translation server (gemma3-4b, CPU)
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+ContainerName=ltengine
+Image=localhost/ltengine:v0.1.1-cpu
+# Local only. To serve other machines on your LAN use 0.0.0.0:5000:5050,
+# allow the port in your firewall, and set an API key below.
+PublishPort=127.0.0.1:5000:5050
+Volume=ltengine-models:/models:Z
+Exec=-m gemma3-4b
+# Other models: -m gemma3-12b (~8 GB RAM, slower, better), -m gemma3-1b (fast, weaker).
+# To require a key, append: --api-key <key>  (and set the same key in Line-GTK)
+
+[Service]
+Restart=always
+# The first start downloads the model (~3 GB).
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target

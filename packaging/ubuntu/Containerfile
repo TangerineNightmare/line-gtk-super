@@ -1,0 +1,13 @@
+# Build environment for Line-GTK Super on Ubuntu (default 24.04).
+ARG BASE=docker.io/library/ubuntu:24.04
+FROM ${BASE}
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl unzip build-essential pkg-config git python3 ffmpeg \
+    libgtk-4-dev libadwaita-1-dev libdbus-1-dev && rm -rf /var/lib/apt/lists/*
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+# protocol/deno.lock is frozen; older Deno releases reject it.
+ARG DENO_VERSION=2.9.8
+RUN curl -sSL -o /tmp/deno.zip https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip \
+ && unzip /tmp/deno.zip -d /usr/local/bin && rm /tmp/deno.zip
+ENV PATH=/root/.cargo/bin:$PATH
